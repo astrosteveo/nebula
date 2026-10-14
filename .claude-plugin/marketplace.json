@@ -1,0 +1,17 @@
+{
+  "name": "nebula",
+  "description": "Steven Mosley's Claude Code mods and plugins.",
+  "owner": {
+    "name": "Steven Mosley"
+  },
+  "plugins": [
+    {
+      "name": "gdh",
+      "source": {
+        "source": "github",
+        "repo": "astrosteveo/gdh"
+      },
+      "description": "Lets Claude make Godot 4 games: see and drive them off-screen on the GPU, work through the open editor with real UIDs, check scripts and the API, run tests and export builds."
+    }
+  ]
+}
