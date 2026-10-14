@@ -17,7 +17,7 @@ A modern restyle of Claude Code's terminal UI, built only on the mods API. Every
 | Rich markdown | Code fences in a frame with the language and line count on the top edge, highlighted; `diff` fences in diff colors; tables redrawn with a rounded frame, an accent header, alignment and inline styles; headings with glyphs; `> [!NOTE]`-style callouts; blockquotes and rules |
 | Tool rows | `✓  ▸ Bash  npm test  12 lines`: a status glyph, the tool as a pill, its target trimmed to fit, and a summary. Click anywhere on the row to open what the tool returned: Bash output, highlighted file contents for Read, the page for WebFetch, errors, or JSON |
 | Explore groups | Folded reads and searches as one line (`Shell` when they're all commands); click to unfold into tool rows |
-| Spinner | Says what the turn is doing: `Kneading… thinking` |
+| Spinner | A colored pill before the engine's own line saying what the turn is doing (`✦ thinking`, `✎ writing`, `⚙ running tools`); the animation, time and tokens stay |
 | Turn divider | `─── ✦ Baked for 1m 4s ──────` at the end of each turn |
 | Notices | Startup notices with an `ℹ` icon |
 | Mode chips | Footer modes as `◉ focus` |

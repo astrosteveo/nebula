@@ -17,7 +17,7 @@ const SITES = [
   { id: 'AssistantMessage', label: 'Rich markdown', about: 'framed code and tables, headings, callouts' },
   { id: 'ToolUse', label: 'Tool rows', about: 'tool pills; click ▸ to open the output' },
   { id: 'ToolGroup', label: 'Explore groups', about: 'folded reads and searches; click ▸ to unfold' },
-  { id: 'Spinner', label: 'Spinner', about: 'says what the turn is doing' },
+  { id: 'Spinner', label: 'Spinner', about: 'a pill saying what the turn is doing' },
   { id: 'TurnDuration', label: 'Turn divider', about: 'a rule at the end of each turn' },
   { id: 'InfoNotice', label: 'Notices', about: 'startup notices with an icon' },
   { id: 'SessionMode', label: 'Mode chips', about: 'footer modes as chips' },
@@ -40,12 +40,13 @@ const toggle = async ($: EngineInterface, site: Site) => {
   await $.store.set('disabled', list)
 }
 
+/** The pill before the spinner line: what the turn is doing, by the spinner's mode. */
 const SPINNER_MODES = {
-  requesting: 'connecting',
-  responding: 'writing',
-  thinking: 'thinking',
-  'tool-input': 'preparing a tool',
-  'tool-use': 'running tools',
+  requesting: { glyph: '⇅', label: 'connecting', color: 'inactive' },
+  responding: { glyph: '✎', label: 'writing', color: 'success' },
+  thinking: { glyph: '✦', label: 'thinking', color: ACCENT },
+  'tool-input': { glyph: '⋯', label: 'preparing', color: 'suggestion' },
+  'tool-use': { glyph: '⚙', label: 'running tools', color: 'suggestion' },
 } as const
 
 const NOUNS: Record<string, [string, string]> = {
@@ -674,10 +675,20 @@ export const register: Register = on => {
     if (e.surface !== 'terminal' || !(await isOn($, 'Spinner'))) {
       return next(e)
     }
-    const shown = e.props.message ?? e.props.word
-    const mark = shown.endsWith('…') ? ' ' : '… '
+    const { Box, Text } = $.ui.resolve(e)
+    const mode = SPINNER_MODES[e.props.mode]
 
-    return next({ ...e, props: { ...e.props, suffix: `${mark}${SPINNER_MODES[e.props.mode]}` } })
+    return (
+      <Box flexDirection="row" gap={1}>
+        <Box flexShrink={0}>
+          <Text inverse weight="bold" color={mode.color}>
+            {' '}
+            {mode.glyph} {mode.label}{' '}
+          </Text>
+        </Box>
+        {await next(e)}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
