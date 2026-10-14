@@ -82,6 +82,12 @@ const PATHLIKE = new Set(['Read', 'Edit', 'Write', 'NotebookEdit', 'WebFetch'])
 const oneLine = (text: string) => text.split('\n')[0]!.replace(/\s+/g, ' ').trim()
 
 /** What the call acts on, in one line: Bash's command, Read's path, a search's pattern. */
+/** Leading `cd dir &&`, `cd dir;` and `NAME=value;` steps, which say where a command runs, not what it does. */
+const PREAMBLE = /^(?:cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*|[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s*;\s*)+/
+
+/** A shell command without its preamble, or as written when the preamble is all there is. */
+const withoutPreamble = (command: string) => command.replace(PREAMBLE, '') || command
+
 const describe = (tool: string, input: unknown): string => {
   if (typeof input !== 'object' || input === null) {
     return ''
@@ -90,7 +96,11 @@ const describe = (tool: string, input: unknown): string => {
   const named = TARGETS[tool]
   const value = named === undefined ? Object.values(fields).find(one => typeof one === 'string') : fields[named]
 
-  return typeof value === 'string' ? oneLine(value) : ''
+  if (typeof value !== 'string') {
+    return ''
+  }
+
+  return tool === 'Bash' ? withoutPreamble(oneLine(value)) : oneLine(value)
 }
 
 /** `mcp__server__tool` as `server · tool`; a built-in as itself. */
@@ -151,6 +161,9 @@ type Ui = Elements['terminal']
 
 const plural = (n: number, word: string) => `${n} ${n === 1 ? word : `${word}s`}`
 
+/** The fewest lines a code frame names its length for; a shorter one is read at a glance. */
+const LINE_COUNT_FROM = 5
+
 const lineCount = (source: string) => plural(source === '' ? 0 : source.split('\n').length, 'line')
 
 /** The first `DETAIL_LINES` lines of `text`, and a note naming how many were left out. */
@@ -168,6 +181,52 @@ const field = (value: unknown, key: string): unknown =>
   typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[key] : undefined
 
 const text = (value: unknown) => (typeof value === 'string' ? value : '')
+
+type EditedFile = { path: string; diff: string; added: number; removed: number }
+
+/** The files a Bash command changed, as the engine recorded them (`bashEditDiff`), each as a unified diff. */
+const editedFiles = (output: unknown): EditedFile[] => {
+  const files = field(field(output, 'bashEditDiff'), 'files')
+  if (!Array.isArray(files)) {
+    return []
+  }
+
+  return files.flatMap(file => {
+    const path = text(field(file, 'filePath'))
+    const hunks = field(file, 'hunks')
+    if (path === '' || !Array.isArray(hunks)) {
+      return []
+    }
+    const lines = hunks.flatMap(hunk => {
+      const at = (key: string) => Number(field(hunk, key) ?? 0)
+      const body = field(hunk, 'lines')
+
+      return [
+        `@@ -${at('oldStart')},${at('oldLines')} +${at('newStart')},${at('newLines')} @@`,
+        ...(Array.isArray(body) ? body.map(String) : []),
+      ]
+    })
+    const body = lines.filter(line => !line.startsWith('@@'))
+
+    return [
+      {
+        path,
+        diff: lines.join('\n'),
+        added: body.filter(line => line.startsWith('+')).length,
+        removed: body.filter(line => line.startsWith('-')).length,
+      },
+    ]
+  })
+}
+
+const basename = (path: string) => path.split('/').pop() ?? path
+
+const changeNote = (file: EditedFile) => `${basename(file.path)} +${file.added} −${file.removed}`
+
+/** Lines the engine adds to a command's stderr about itself (`Shell cwd was reset to …`), not the command's own. */
+const ENGINE_NOTE = /^Shell cwd was reset to .*$/gm
+
+const withoutEngineNotes = (stderr: string) => stderr.replace(ENGINE_NOTE, '').trim()
 
 /** A dim word or two after a finished call's target: what it returned, at a glance. */
 const summary = (tool: string, output: unknown) => {
@@ -199,31 +258,19 @@ const kit = ({ Box, Text, Code }: Ui, columns: number) => {
     </Box>
   )
 
-  const edge = (left: string, right: string, label?: string, note?: string) => (
-    <Box flexDirection="row">
-      <Box flexShrink={0}>
-        <Text color="inactive">{left}─</Text>
-        {label !== undefined && <Text color={ACCENT}> {label} </Text>}
-      </Box>
-      <Box flexGrow={1} height={1} overflow="hidden">
-        <Text color="inactive">{'─'.repeat(columns)}</Text>
-      </Box>
-      <Box flexShrink={0}>
-        {note !== undefined && <Text color="inactive"> {note} ─</Text>}
-        <Text color="inactive">{right}</Text>
-      </Box>
-    </Box>
-  )
-
+  // A frame is a bordered Box, which the engine clips like any other when it is partly scrolled out of
+  // view (absolutely placed sides were drawn whole from the viewport's edge, spilling past the frame).
+  // Its label and note are laid over the top border: column-reverse puts the overlay above the Box, its
+  // -1 margin pulls it onto the border row, and as the later child it is painted last.
   const frame = (body: RenderChildren, label?: string, note?: string) => (
-    <Box flexDirection="column">
-      {edge('╭', '╮', label, note)}
-      <Box position="relative" flexDirection="column" paddingX={2}>
-        {bar('inactive', '│')}
-        {bar('inactive', '│', 'right')}
+    <Box flexDirection="column-reverse">
+      <Box flexDirection="column" borderStyle="round" borderColor="inactive" paddingX={1}>
         {body}
       </Box>
-      {edge('╰', '╯')}
+      <Box flexDirection="row" justifyContent="space-between" marginX={2} marginBottom={-1} height={1} overflow="hidden">
+        <Text color={ACCENT}>{label === undefined ? '' : ` ${label} `}</Text>
+        <Text color="inactive">{note === undefined ? '' : ` ${note} `}</Text>
+      </Box>
     </Box>
   )
 
@@ -296,7 +343,7 @@ const kit = ({ Box, Text, Code }: Ui, columns: number) => {
     )
   }
 
-  return { line, bar, edge, frame, code, inline, table }
+  return { line, bar, frame, code, inline, table }
 }
 
 /** What an opened tool row shows: the output a model read, framed and highlighted. */
@@ -311,13 +358,18 @@ const detail = (ui: Ui, columns: number, tool: string, output: unknown, isErrore
   }
   if (tool === 'Bash') {
     const stdout = clip(text(field(output, 'stdout')))
-    const stderr = clip(text(field(output, 'stderr')))
+    const stderr = clip(withoutEngineNotes(text(field(output, 'stderr'))))
+
+    const files = editedFiles(output)
 
     return (
       <Box flexDirection="column">
         {stdout.text !== '' && frame(code(stdout.text, {}), 'stdout', stdout.note)}
         {stderr.text !== '' && frame(<Text color="error">{stderr.text}</Text>, 'stderr', stderr.note)}
-        {stdout.text === '' && stderr.text === '' && <Text dimColor>no output</Text>}
+        {files.map(file =>
+          frame(code(file.diff, { language: 'diff', path: file.path }), basename(file.path), `+${file.added} −${file.removed}`),
+        )}
+        {stdout.text === '' && stderr.text === '' && files.length === 0 && <Text dimColor>no output</Text>}
       </Box>
     )
   }
@@ -509,7 +561,7 @@ export const register: Register = on => {
           return frame(
             code(block.source, block.language === '' ? {} : { language: block.language }),
             block.language === '' ? undefined : block.language,
-            lineCount(block.source),
+            block.source.split('\n').length >= LINE_COUNT_FROM ? lineCount(block.source) : undefined,
           )
         case 'table':
           return table(block)
@@ -579,7 +631,8 @@ export const register: Register = on => {
     const target = describe(tool, input)
     const isExpandable = !isRunning && output !== undefined && (isErrored || !ENGINE_RESULTS.has(tool))
     const isOpen = isExpandable && (await $.state.get({ ...expanded, id: tool_use_id })).value === true
-    const brief = isErrored || isRunning ? '' : summary(tool, output)
+    // An opened row's frame names the length, so the row itself leaves it out.
+    const brief = isErrored || isRunning || isOpen ? '' : summary(tool, output)
     const columns = e.viewport?.columns ?? 80
     const pillText = ` ${isExpandable ? `${isOpen ? '▾' : '▸'} ` : ''}${toolName(tool)} `
     const tail = `${brief === '' ? '' : ` ${brief}`}${status.word === '' ? '' : ` ${status.word}`}`
@@ -600,6 +653,36 @@ export const register: Register = on => {
           {status.word !== '' && <Text color={status.color}> {status.word}</Text>}
         </Button>
         {isOpen && <Box paddingLeft={2}>{detail(ui, e.viewport?.columns ?? 80, tool, output, isErrored)}</Box>}
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    const { tool_use_id, tool, output, isErrored } = e.props
+    if (e.surface !== 'terminal' || ENGINE_RESULTS.has(tool) || !(await isOn($, 'ToolUse'))) {
+      return next(e)
+    }
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const isOpen = (await $.state.get({ ...expanded, id: tool_use_id })).value === true
+    const files = isErrored ? [] : editedFiles(output)
+    // The row says what ran and its line count, and opens on a click to the full output; the block
+    // under it keeps only what the row can't say: an error, or the files the command changed.
+    if (isOpen || (!isErrored && files.length === 0)) {
+      return <Box />
+    }
+    const error = typeof output === 'string' ? oneLine(output) : ''
+    const label = isErrored ? `✗ ${error === '' ? 'failed' : error}` : `± ${files.map(changeNote).join(' · ')}`
+    const room = (e.viewport?.columns ?? 80) - ROW_MARGIN - 2
+
+    return (
+      <Box paddingLeft={2}>
+        <Button
+          key={`result-${tool_use_id}`}
+          plain
+          onPress={() => update($, { ...expanded, id: tool_use_id }, value => value !== true)}
+        >
+          <Text color={isErrored ? 'error' : 'inactive'}>{fit(label, room, false)}</Text>
+        </Button>
       </Box>
     )
   })

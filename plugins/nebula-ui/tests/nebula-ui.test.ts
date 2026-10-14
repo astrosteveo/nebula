@@ -74,6 +74,7 @@ test('a finished row opens on its chevron to show what the tool returned', async
 
   await row.press({ key: 'open-toolu_1' })
   expect(await row.find({ type: 'Text', text: /▾ Bash/ })).toBeDefined()
+  expect((await row.find({ type: 'Button' }))?.text).not.toContain('2 lines')
   expect((await row.find({ type: 'Code' }))?.props).toMatchObject({ source: 'ok\nall good' })
 })
 
@@ -135,4 +136,87 @@ test('a command prints behind an accent bar, an error behind a red one', async $
 
   expect((await failed.find({ type: 'Text', text: /▎/ }))?.props).toMatchObject({ color: 'error' })
   expect(await failed.find({ type: 'Text', text: /✗ failed/ })).toBeDefined()
+})
+
+test('a Bash row leaves out where the command runs and shows what it does', async $ => {
+  const row = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: { ...bashRow, input: { command: 'M=/tmp/mod; cd "$M" && claude plugin test .' } },
+    viewport: { columns: 120, rows: 24 },
+  })
+  const line = (await row.find({ type: 'Button' }))?.text ?? ''
+
+  expect(line).toContain('claude plugin test .')
+  expect(line).not.toContain('cd ')
+  expect(line).not.toContain('M=')
+})
+
+const edited = {
+  stdout: 'tsc=0',
+  stderr: '',
+  interrupted: false,
+  bashEditDiff: {
+    files: [
+      {
+        filePath: '/repo/hooks/register.tsx',
+        hunks: [{ oldStart: 3, oldLines: 1, newStart: 3, newLines: 2, lines: ['-const a = 1', '+// why', '+const a = 2'] }],
+      },
+    ],
+    moreFiles: 0,
+  },
+}
+
+test('a result block keeps only what the row cannot say, and a click on it opens the row', async $ => {
+  const quiet = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolResult',
+    props: { tool_use_id: 'toolu_2', tool: 'Bash', output: { stdout: 'ok', stderr: '', interrupted: false }, isErrored: false },
+  })
+  expect(await quiet.find({ type: 'Text' })).toBeUndefined()
+
+  const changed = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolResult',
+    props: { tool_use_id: 'toolu_3', tool: 'Bash', output: edited, isErrored: false },
+  })
+  expect((await changed.find({ type: 'Button' }))?.text).toContain('± register.tsx +2 −1')
+
+  await changed.press({ key: 'result-toolu_3' })
+  expect(await changed.find({ type: 'Button' })).toBeUndefined()
+})
+
+test('an opened Bash row shows each file it changed as a diff', async $ => {
+  const row = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: { ...bashRow, tool_use_id: 'toolu_4', isRunning: false, output: edited },
+  })
+  await row.press({ key: 'open-toolu_4' })
+  const codes = await row.findAll({ type: 'Code' })
+
+  expect(codes.map(code => code.props.format)).toEqual(['source', 'diff'])
+  expect(codes[1]?.props.source).toBe('@@ -3,1 +3,2 @@\n-const a = 1\n+// why\n+const a = 2')
+})
+
+test('an opened Bash row leaves out the notes the engine adds to stderr', async $ => {
+  const row = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: {
+      ...bashRow,
+      tool_use_id: 'toolu_5',
+      isRunning: false,
+      output: { stdout: 'done', stderr: '\nShell cwd was reset to /repo', interrupted: false },
+    },
+  })
+  await row.press({ key: 'open-toolu_5' })
+
+  expect(await row.find({ type: 'Text', text: /stderr/ })).toBeUndefined()
+  expect(await row.find({ type: 'Text', text: /cwd was reset/ })).toBeUndefined()
 })

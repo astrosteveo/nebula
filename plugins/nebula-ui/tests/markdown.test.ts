@@ -102,3 +102,21 @@ test('a table row is exactly as wide as its border', async $ => {
 
   expect(header).toBe([...top].length)
 })
+
+test('a short code frame names no length, a long one does', async $ => {
+  const short = await $.ui.mount({
+    plugin: 'nebula-ui',
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    props: { text: '```ts\nconst a = 1\n```', isFirstOfReply: false },
+  })
+  const long = await $.ui.mount({
+    plugin: 'nebula-ui',
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    props: { text: '```ts\n1\n2\n3\n4\n5\n6\n```', isFirstOfReply: false },
+  })
+
+  expect(await short.find({ type: 'Text', text: /line/ })).toBeUndefined()
+  expect(await long.find({ type: 'Text', text: /6 lines/ })).toBeDefined()
+})
