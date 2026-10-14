@@ -2,8 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Dash, Disabled } from '../types'
-import { fitColumns, parse, spans, width } from './markdown'
-import type { Block, Callout } from './markdown'
+import { fitColumns, parse, rowWidth, spans, width, wrapSpans, wrapText } from './markdown'
+import type { Block, Callout, Span } from './markdown'
 import { drawBand, gather } from './dashboard'
 import { ACCENT } from './theme'
 
@@ -25,6 +25,7 @@ const SITES = [
   { id: 'ToolProgress', label: 'Background hint', about: 'a compact ctrl+b hint' },
   { id: 'AbovePrompt', label: 'Dashboard band', about: 'model, branch, context, limits, cost above the prompt' },
   { id: 'CommandOutput', label: 'Command output', about: 'what a slash command printed, behind an accent bar' },
+  { id: 'CommandMenu', label: 'Command menu', about: 'a glyph per command: ◆ built-in, ◇ plugin, ✦ nebula-ui' },
 ] as const
 
 type Site = (typeof SITES)[number]['id']
@@ -38,6 +39,10 @@ const toggle = async ($: EngineInterface, site: Site) => {
     off.includes(site) ? off.filter(one => one !== site) : [...off, site],
   )
   await $.store.set('disabled', list)
+  if (site === 'CommandMenu') {
+    // The engine keeps each command's listing for the session; this asks it to list them again.
+    await $.ui.invalidate('command.describe')
+  }
 }
 
 /** What the engine's spinner draws in place of its word, which nebula-ui draws in a pill. */
@@ -144,18 +149,25 @@ const CALLOUTS: Record<Callout, { glyph: string; color: string; title: string }>
 
 const HEADINGS = ['◆', '◇', '›']
 
-/** A column of `glyph` as tall as its siblings, drawn over the parent's left edge. */
-const BAR_ROWS = 400
 
 const expanded = { plugin: 'nebula-ui', key: 'expanded' } as const
 
-/** Tools whose result the engine already draws under the row (a diff, a summary): no expander. */
-const ENGINE_RESULTS = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit', 'TodoWrite'])
+/** Tools whose result the engine draws under the row as the point of the call (a diff, a plan, a subagent's answer): no expander. */
+const ENGINE_RESULTS = new Set([
+  'Edit',
+  'Write',
+  'NotebookEdit',
+  'MultiEdit',
+  'TodoWrite',
+  'Agent',
+  'Task',
+  'AskUserQuestion',
+  'ExitPlanMode',
+  'EnterPlanMode',
+])
 
 /** Lines an opened tool row shows before it says how many more there are. */
 const DETAIL_LINES = 40
-
-const JUSTIFY = { left: 'flex-start', center: 'center', right: 'flex-end' } as const
 
 type Ui = Elements['terminal']
 
@@ -228,6 +240,39 @@ const ENGINE_NOTE = /^Shell cwd was reset to .*$/gm
 
 const withoutEngineNotes = (stderr: string) => stderr.replace(ENGINE_NOTE, '').trim()
 
+/** The text a result carries as content blocks (`{ type: 'text', text }`), alone or under `content`, as MCP tools return it. */
+const textOf = (value: unknown): string | null => {
+  const blocks = Array.isArray(value) ? value : field(value, 'content')
+  if (!Array.isArray(blocks)) {
+    return null
+  }
+  const texts = blocks.map(block => (field(block, 'type') === 'text' ? text(field(block, 'text')) : '')).filter(one => one !== '')
+
+  return texts.length > 0 ? texts.join('\n\n') : null
+}
+
+/** The links a WebSearch found, as `[title](url)` pairs. */
+const searchLinks = (output: unknown) => {
+  const results = field(output, 'results')
+
+  return (Array.isArray(results) ? results : []).flatMap(result => {
+    const content = field(result, 'content')
+
+    return (Array.isArray(content) ? content : []).flatMap(hit => {
+      const title = text(field(hit, 'title'))
+      const url = text(field(hit, 'url'))
+
+      return url === '' ? [] : [{ title: title === '' ? url : title, url }]
+    })
+  })
+}
+
+const filenames = (output: unknown) => {
+  const names = field(output, 'filenames')
+
+  return Array.isArray(names) ? names.filter((one): one is string => typeof one === 'string') : []
+}
+
 /** A dim word or two after a finished call's target: what it returned, at a glance. */
 const summary = (tool: string, output: unknown) => {
   if (tool === 'Read') {
@@ -236,9 +281,28 @@ const summary = (tool: string, output: unknown) => {
     return typeof lines === 'number' ? plural(lines, 'line') : ''
   }
   if (tool === 'Bash') {
-    const out = `${text(field(output, 'stdout'))}${text(field(output, 'stderr'))}`.trim()
+    const out = `${text(field(output, 'stdout'))}${withoutEngineNotes(text(field(output, 'stderr')))}`.trim()
+    const files = editedFiles(output).length
 
-    return out === '' ? 'no output' : lineCount(out)
+    return [out === '' ? 'no output' : lineCount(out), ...(files > 0 ? [plural(files, 'file') + ' changed'] : [])].join(' · ')
+  }
+  if (tool === 'Grep' || tool === 'Glob') {
+    const lines = field(output, 'numLines')
+    const files = field(output, 'numFiles')
+
+    return typeof lines === 'number' && lines > 0
+      ? plural(lines, 'line')
+      : typeof files === 'number'
+        ? plural(files, 'file')
+        : ''
+  }
+  if (tool === 'WebSearch') {
+    return plural(searchLinks(output).length, 'result')
+  }
+  if (tool === 'WebFetch') {
+    const code = field(output, 'code')
+
+    return typeof code === 'number' ? `${code} ${text(field(output, 'codeText'))}`.trim() : ''
   }
 
   return ''
@@ -252,11 +316,55 @@ const kit = ({ Box, Text, Code }: Ui, columns: number) => {
     </Box>
   )
 
-  const bar = (color: string, glyph = '▌', side: 'left' | 'right' = 'left') => (
-    <Box position="absolute" top={0} bottom={0} {...{ [side]: 0 }} width={1} overflow="hidden">
-      <Text color={color}>{`${glyph}\n`.repeat(BAR_ROWS)}</Text>
-    </Box>
-  )
+  const styled = (run: Span) => {
+    switch (run.style) {
+      case 'code':
+        return <Text color={ACCENT}>{run.text}</Text>
+      case 'command':
+        return (
+          <Text weight="bold" color={ACCENT}>
+            {run.text}
+          </Text>
+        )
+      case 'bold':
+        return <Text weight="bold">{run.text}</Text>
+      case 'italic':
+        return <Text italic>{run.text}</Text>
+      case 'strike':
+        return <Text strikethrough>{run.text}</Text>
+      case 'link':
+        return (
+          <Text color="suggestion" underline>
+            {run.text}
+          </Text>
+        )
+      default:
+        return run.text
+    }
+  }
+
+  // Bars are drawn as text, one glyph per wrapped row: a bar is exactly as tall as what it marks,
+  // and nothing is placed absolutely (which the engine drew whole past a site partly scrolled out of view).
+  const barred = (rows: Span[][], color: string, options: { glyph?: string; head?: RenderChildren; isDim?: boolean } = {}) => {
+    const mark = <Text color={color}>{options.glyph ?? '▌'} </Text>
+
+    return (
+      <Box flexDirection="column">
+        {options.head !== undefined && (
+          <Text>
+            {mark}
+            {options.head}
+          </Text>
+        )}
+        {rows.map(row => (
+          <Text>
+            {mark}
+            <Text dimColor={options.isDim === true}>{row.map(styled)}</Text>
+          </Text>
+        ))}
+      </Box>
+    )
+  }
 
   // A frame is a bordered Box, which the engine clips like any other when it is partly scrolled out of
   // view (absolutely placed sides were drawn whole from the viewport's edge, spilling past the frame).
@@ -278,28 +386,10 @@ const kit = ({ Box, Text, Code }: Ui, columns: number) => {
     <Code source={source} {...options} format={options.language === 'diff' ? 'diff' : 'source'} />
   )
 
-  const inline = (line: string) =>
-    spans(line).map(run => {
-      switch (run.style) {
-        case 'code':
-          return <Text color={ACCENT}>{run.text}</Text>
-        case 'bold':
-          return <Text weight="bold">{run.text}</Text>
-        case 'italic':
-          return <Text italic>{run.text}</Text>
-        case 'strike':
-          return <Text strikethrough>{run.text}</Text>
-        case 'link':
-          return (
-            <Text color="suggestion" underline>
-              {run.text}
-            </Text>
-          )
-        default:
-          return run.text
-      }
-    })
+  const inline = (line: string) => spans(line).map(styled)
 
+  // A table is drawn as lines of text: every cell wrapped to its column, each row as tall as its tallest
+  // cell, the dividers written into each line rather than placed beside it.
   const table = (block: Extract<Block, { kind: 'table' }>) => {
     const count = block.header.length
     const natural = block.header.map((cell, column) =>
@@ -309,41 +399,55 @@ const kit = ({ Box, Text, Code }: Ui, columns: number) => {
     const border = (left: string, middle: string, right: string) => (
       <Text color="inactive">{left + widths.map(one => '─'.repeat(one + 2)).join(middle) + right}</Text>
     )
-    const row = (values: string[], isHeader: boolean) => (
-      <Box flexDirection="row">
-        {values.map((value, column) => {
-          const isLast = column === count - 1
+    const pad = (row: Span[], column: number) => {
+      const room = widths[column]! - rowWidth(row)
+      const align = block.align[column] ?? 'left'
+      const before = align === 'right' ? room : align === 'center' ? Math.floor(room / 2) : 0
 
-          return (
-            <Box
-              position="relative"
-              flexShrink={0}
-              width={widths[column]! + (isLast ? 4 : 3)}
-              paddingLeft={2}
-              paddingRight={isLast ? 2 : 1}
-              justifyContent={JUSTIFY[block.align[column] ?? 'left']}
-            >
-              {bar('inactive', '│')}
-              {isLast && bar('inactive', '│', 'right')}
-              <Text {...(isHeader ? { weight: 'bold' as const, color: ACCENT } : {})}>{inline(value)}</Text>
-            </Box>
-          )
-        })}
-      </Box>
-    )
+      return [' '.repeat(Math.max(0, before)), ' '.repeat(Math.max(0, room - before))] as const
+    }
+    const lines = (values: string[], isHeader: boolean) => {
+      const cells = values.map((value, column) => wrapSpans(spans(value), widths[column]!))
+      const height = Math.max(1, ...cells.map(rows => rows.length))
+
+      return Array.from({ length: height }, (_, index) => (
+        <Text wrap="truncate-end">
+          {cells.map((rows, column) => {
+            const row = rows[index] ?? []
+            const [before, after] = pad(row, column)
+
+            return (
+              <Text>
+                <Text color="inactive">│ </Text>
+                {before}
+                {isHeader ? (
+                  <Text weight="bold" color={ACCENT}>
+                    {row.map(styled)}
+                  </Text>
+                ) : (
+                  row.map(styled)
+                )}
+                {after}{' '}
+              </Text>
+            )
+          })}
+          <Text color="inactive">│</Text>
+        </Text>
+      ))
+    }
 
     return (
       <Box flexDirection="column">
         {border('╭', '┬', '╮')}
-        {row(block.header, true)}
+        {lines(block.header, true)}
         {border('├', '┼', '┤')}
-        {block.rows.map(values => row(values, false))}
+        {block.rows.flatMap(values => lines(values, false))}
         {border('╰', '┴', '╯')}
       </Box>
     )
   }
 
-  return { line, bar, frame, code, inline, table }
+  return { line, barred, frame, code, inline, styled, table }
 }
 
 /** What an opened tool row shows: the output a model read, framed and highlighted. */
@@ -389,6 +493,27 @@ const detail = (ui: Ui, columns: number, tool: string, output: unknown, isErrore
     const shown = clip(text(field(output, 'result')))
 
     return frame(<Markdown text={shown.text} />, text(field(output, 'url')), shown.note)
+  }
+  if (tool === 'Grep' && typeof field(output, 'content') === 'string') {
+    const shown = clip(text(field(output, 'content')))
+
+    return frame(code(shown.text, {}), 'matches', shown.note)
+  }
+  if ((tool === 'Grep' || tool === 'Glob') && filenames(output).length > 0) {
+    const shown = clip(filenames(output).join('\n'))
+
+    return frame(code(shown.text, {}), 'files', shown.note)
+  }
+  if (tool === 'WebSearch' && searchLinks(output).length > 0) {
+    const shown = clip(searchLinks(output).map(link => `- [${link.title}](${link.url})`).join('\n'))
+
+    return frame(<Markdown text={shown.text} />, 'results', shown.note)
+  }
+  const said = textOf(output)
+  if (said !== null) {
+    const shown = clip(said)
+
+    return frame(<Markdown text={shown.text} />, 'result', shown.note)
   }
   const shown = clip(JSON.stringify(output, null, 2) ?? '')
 
@@ -444,6 +569,8 @@ export const register: Register = on => {
     })
     void gather($)
     $.clock.every(15_000, () => void gather($))
+    // Commands the engine listed before this load keep their old descriptions until it lists them again.
+    void $.ui.invalidate('command.describe')
 
     return next(e)
   })
@@ -469,6 +596,17 @@ export const register: Register = on => {
     const figures = await read($, dash)
 
     return figures === null ? next(e) : drawBand($.ui.resolve(e), figures)
+  })
+
+  on('command.describe', async ($, e, next) => {
+    const listed = await next(e)
+    if (!(await isOn($, 'CommandMenu'))) {
+      return listed
+    }
+    // The menu draws descriptions in its own colors, so a glyph is the decoration a mod can give it.
+    const glyph = e.provider.plugin === 'engine' ? '◆' : e.provider.plugin === $.plugin.name ? '✦' : '◇'
+
+    return { ...listed, description: `${glyph} ${listed.description}` }
   })
 
   on('command.run', { command: 'nebula' }, async $ => {
@@ -511,25 +649,23 @@ export const register: Register = on => {
 
     const isOwn = e.props.task === undefined && e.props.from === undefined && OWN_ORIGINS.has(e.props.origin.kind)
     if (isOwn) {
-      const command = /^(\/\S+)([\s\S]*)$/.exec(e.props.text)
+      const { barred } = kit($.ui.resolve(e), e.viewport?.columns ?? 80)
+      const room = (e.viewport?.columns ?? 80) - 3
+      // The prompt as typed: no markdown read into it, a leading slash command marked out.
+      const rows = e.props.text.split('\n').flatMap((line, index) => {
+        const command = index === 0 ? /^(\/\S+)(.*)$/.exec(line) : null
+        const runs: Span[] =
+          command === null
+            ? [{ text: line, style: 'plain' }]
+            : [
+                { text: command[1]!, style: 'command' },
+                { text: command[2]!, style: 'plain' },
+              ]
 
-      return (
-        <Box position="relative" marginTop={1} paddingLeft={2}>
-          <Box position="absolute" top={0} bottom={0} left={0} width={1} overflow="hidden">
-            <Text color={ACCENT}>{'▌\n'.repeat(BAR_ROWS)}</Text>
-          </Box>
-          {command === null ? (
-            <Text>{e.props.text}</Text>
-          ) : (
-            <Text>
-              <Text weight="bold" color={ACCENT}>
-                {command[1]}
-              </Text>
-              {command[2]}
-            </Text>
-          )}
-        </Box>
-      )
+        return wrapSpans(runs, room)
+      })
+
+      return <Box marginTop={1}>{barred(rows, ACCENT)}</Box>
     }
     const drawn = await next(e)
     if (e.props.task !== undefined) {
@@ -551,7 +687,9 @@ export const register: Register = on => {
       return next(e)
     }
     const { Box, Text, Markdown } = $.ui.resolve(e)
-    const { line, bar, frame, code, inline, table } = kit($.ui.resolve(e), e.viewport?.columns ?? 80)
+    const { line, barred, frame, code, inline, table } = kit($.ui.resolve(e), e.viewport?.columns ?? 80)
+    // What a block may take beside the reply's two-column gutter, one column spare.
+    const room = (e.viewport?.columns ?? 80) - 3
 
     const draw = (block: Block) => {
       switch (block.kind) {
@@ -585,17 +723,18 @@ export const register: Register = on => {
         case 'quote': {
           const tone = block.callout === null ? null : CALLOUTS[block.callout]
 
-          return (
-            <Box position="relative" flexDirection="column" paddingLeft={2}>
-              {bar(tone?.color ?? 'inactive')}
-              {tone !== null && (
-                <Text weight="bold" color={tone.color}>
-                  {tone.glyph} {block.title === '' ? tone.title : block.title}
-                </Text>
-              )}
-              {block.text !== '' && <Markdown text={block.text} dimColor={tone === null} />}
-            </Box>
-          )
+          return barred(block.text === '' ? [] : wrapText(block.text, room - 2), tone?.color ?? 'inactive', {
+            isDim: tone === null,
+            ...(tone === null
+              ? {}
+              : {
+                  head: (
+                    <Text weight="bold" color={tone.color}>
+                      {tone.glyph} {block.title === '' ? tone.title : block.title}
+                    </Text>
+                  ),
+                }),
+          })
         }
         case 'rule':
           return line('─', 'inactive')
@@ -740,19 +879,25 @@ export const register: Register = on => {
       return next(e)
     }
     const ui = $.ui.resolve(e)
-    const { Box, Text, Markdown } = ui
-    const { bar } = kit(ui, e.viewport?.columns ?? 80)
+    const { Box, Text } = ui
+    const { barred } = kit(ui, e.viewport?.columns ?? 80)
     const { text, isErrored } = e.props
+    const room = (e.viewport?.columns ?? 80) - 5
 
     return (
-      <Box position="relative" flexDirection="column" marginLeft={2} paddingLeft={2}>
-        {bar(isErrored ? 'error' : ACCENT, '▎')}
-        {isErrored && (
-          <Text weight="bold" color="error">
-            ✗ failed
-          </Text>
-        )}
-        <Markdown text={text} />
+      <Box marginLeft={2}>
+        {barred(wrapText(text.replace(/\n+$/, ''), room), isErrored ? 'error' : ACCENT, {
+          glyph: '▎',
+          ...(isErrored
+            ? {
+                head: (
+                  <Text weight="bold" color="error">
+                    ✗ failed
+                  </Text>
+                ),
+              }
+            : {}),
+        })}
       </Box>
     )
   })
@@ -762,7 +907,9 @@ export const register: Register = on => {
       return next(e)
     }
     const { Box, Text } = $.ui.resolve(e)
-    const mode = SPINNER_MODES[e.props.mode]
+    const mode: { glyph: string; label: string; color: string } = (
+      SPINNER_MODES as Record<string, { glyph: string; label: string; color: string } | undefined>
+    )[e.props.mode] ?? { glyph: '◆', label: e.props.mode, color: ACCENT }
     const shown = e.props.message ?? e.props.word
     const word = shown.endsWith('…') ? shown : `${shown}…`
     // The word moves into a pill of its own; the engine still draws its glyph, time and tokens. An empty word

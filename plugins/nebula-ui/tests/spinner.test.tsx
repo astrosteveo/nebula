@@ -22,3 +22,19 @@ test('the spinner puts its mode and its word in pills, the engine keeping its gl
   expect((await spinner.find({ type: 'Text', text: / Kneading… / }))?.props).toMatchObject({ color: 'claude' })
   expect(await spinner.find({ type: 'Text', text: /^✻ \u00a0 \(12s/ })).toBeDefined()
 })
+
+test('a spinner mode nebula-ui does not know draws a plain pill, not a failure', async ($, on) => {
+  on('ui.render', { component: 'Spinner' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>✻ (1s)</Text>
+  })
+  const spinner = await $.ui.mount({
+    plugin: 'nebula-ui',
+    surface: 'terminal',
+    component: 'Spinner',
+    props: { word: 'Kneading', message: null, suffix: '…', mode: 'dreaming' as 'thinking' },
+  })
+
+  expect(await spinner.find({ type: 'Text', text: /◆ dreaming/ })).toBeDefined()
+})

@@ -123,8 +123,9 @@ test('a command prints behind an accent bar, an error behind a red one', async $
   const props = { command: 'reload-plugins', args: '', text: 'Reloaded: 5 plugins', isErrored: false }
   const done = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'CommandOutput', props })
 
-  expect(await done.find({ type: 'Markdown', text: 'Reloaded: 5 plugins' })).toBeDefined()
-  expect((await done.find({ type: 'Text', text: /▎/ }))?.props).toMatchObject({ color: 'permission' })
+  expect(await done.find({ type: 'Text', text: /Reloaded: 5 plugins/ })).toBeDefined()
+  const mark = async (row: typeof done) => (await row.findAll({ type: 'Text', text: '▎ ' })).find(one => one.text === '▎ ')
+  expect((await mark(done))?.props).toMatchObject({ color: 'permission' })
   expect(await done.find({ type: 'Text', text: /✗/ })).toBeUndefined()
 
   const failed = await $.ui.mount({
@@ -134,7 +135,7 @@ test('a command prints behind an accent bar, an error behind a red one', async $
     props: { ...props, text: 'No such plugin', isErrored: true },
   })
 
-  expect((await failed.find({ type: 'Text', text: /▎/ }))?.props).toMatchObject({ color: 'error' })
+  expect((await mark(failed))?.props).toMatchObject({ color: 'error' })
   expect(await failed.find({ type: 'Text', text: /✗ failed/ })).toBeDefined()
 })
 
@@ -219,4 +220,70 @@ test('an opened Bash row leaves out the notes the engine adds to stderr', async 
 
   expect(await row.find({ type: 'Text', text: /stderr/ })).toBeUndefined()
   expect(await row.find({ type: 'Text', text: /cwd was reset/ })).toBeUndefined()
+})
+
+test('a search row says what it found and opens on the files, not JSON', async $ => {
+  const row = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: {
+      ...bashRow,
+      tool_use_id: 'toolu_6',
+      tool: 'Glob',
+      input: { pattern: '**/*.ts' },
+      isRunning: false,
+      output: { filenames: ['a.ts', 'b.ts', 'c.ts'], numFiles: 3, durationMs: 4, truncated: false },
+    },
+  })
+  expect((await row.find({ type: 'Button' }))?.text).toContain('3 files')
+
+  await row.press({ key: 'open-toolu_6' })
+  expect((await row.find({ type: 'Code' }))?.props).toMatchObject({ source: 'a.ts\nb.ts\nc.ts' })
+})
+
+test("an MCP tool's text result opens as markdown", async $ => {
+  const row = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: {
+      ...bashRow,
+      tool_use_id: 'toolu_7',
+      tool: 'mcp__docs__read',
+      input: { id: 'abc' },
+      isRunning: false,
+      output: [{ type: 'text', text: '# Title\nBody' }],
+    },
+  })
+  await row.press({ key: 'open-toolu_7' })
+
+  expect((await row.find({ type: 'Markdown' }))?.props).toMatchObject({ text: '# Title\nBody' })
+})
+
+test("an Agent's result block is left to the engine", async $ => {
+  const mount = $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolResult',
+    props: { tool_use_id: 'toolu_8', tool: 'Agent', output: { content: [{ type: 'text', text: 'done' }] }, isErrored: false },
+  })
+
+  await expect(mount).rejects.toThrow(/no implementation for ui.render/)
+})
+
+test('the command menu marks each command by where it comes from', async ($, on) => {
+  on('command.describe', ($, e) => ({ description: e.description, isHidden: e.isHidden }))
+  const listed = async (plugin: string) =>
+    $.command.describe({
+      command: 'x',
+      description: 'Does x',
+      isHidden: false,
+      immediate: false,
+      provider: { plugin, tier: plugin === 'engine' ? 'core' : 'plugin' },
+    } as Parameters<typeof $.command.describe>[0])
+
+  expect(await listed('engine')).toMatchObject({ description: '◆ Does x' })
+  expect(await listed('gdh')).toMatchObject({ description: '◇ Does x' })
+  expect(await listed('nebula-ui')).toMatchObject({ description: '✦ Does x' })
 })

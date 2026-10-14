@@ -17,7 +17,7 @@ export type Block =
   | { kind: 'quote'; callout: Callout | null; title: string; text: string }
   | { kind: 'rule' }
 
-export type Span = { text: string; style: 'plain' | 'code' | 'bold' | 'italic' | 'strike' | 'link' }
+export type Span = { text: string; style: 'plain' | 'code' | 'bold' | 'italic' | 'strike' | 'link' | 'command' }
 
 const FENCE = /^( {0,3})(`{3,}|~{3,})\s*([^\s`]*)/
 const HEADING = /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/
@@ -232,3 +232,79 @@ export const fitColumns = (natural: number[], room: number) => {
 
   return widths
 }
+
+/** Columns a run of text takes: one per code point (wide glyphs are rare in what nebula-ui wraps). */
+const columnsOf = (text: string) => [...text].length
+
+/**
+ * Styled runs word-wrapped into rows of at most `room` columns, styles kept across the breaks: a word
+ * longer than a row is cut, spaces at a break are dropped. An empty input is one empty row.
+ */
+export const wrapSpans = (runs: Span[], room: number): Span[][] => {
+  const limit = Math.max(1, room)
+  const rows: Span[][] = [[]]
+  let used = 0
+  let hasWords = false
+
+  const add = (text: string, style: Span['style']) => {
+    const row = rows[rows.length - 1]!
+    const last = row[row.length - 1]
+    if (last !== undefined && last.style === style) {
+      last.text += text
+    } else {
+      row.push({ text, style })
+    }
+    used += columnsOf(text)
+  }
+
+  const breakRow = () => {
+    const row = rows[rows.length - 1]!
+    const last = row[row.length - 1]
+    if (last !== undefined) {
+      last.text = last.text.replace(/\s+$/, '')
+    }
+    rows.push([])
+    used = 0
+  }
+
+  for (const run of runs) {
+    for (const token of run.text.split(/(\s+)/)) {
+      if (token === '') {
+        continue
+      }
+      if (/^\s+$/.test(token)) {
+        if (!hasWords) {
+          // A line's own indentation stays.
+          add(token.slice(0, limit - 1), run.style)
+        } else if (used > 0 && used + columnsOf(token) <= limit) {
+          add(token, run.style)
+        } else if (used > 0) {
+          breakRow()
+        }
+        continue
+      }
+      hasWords = true
+      let word = [...token]
+      if (used > 0 && used + word.length > limit) {
+        breakRow()
+      }
+      while (word.length > limit) {
+        add(word.slice(0, limit).join(''), run.style)
+        breakRow()
+        word = word.slice(limit)
+      }
+      if (word.length > 0) {
+        add(word.join(''), run.style)
+      }
+    }
+  }
+
+  return rows.map(row => row.filter(run => run.text !== ''))
+}
+
+/** Text with newlines wrapped line by line; inline markdown read as styles unless `isPlain`. */
+export const wrapText = (text: string, room: number, isPlain = false): Span[][] =>
+  text.split('\n').flatMap(line => wrapSpans(isPlain ? [{ text: line, style: 'plain' }] : spans(line), room))
+
+/** Columns a row of runs takes. */
+export const rowWidth = (row: Span[]) => row.reduce((sum, run) => sum + columnsOf(run.text), 0)

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { fitColumns, parse, width } from '../hooks/markdown'
+import { fitColumns, parse, width, wrapSpans, wrapText } from '../hooks/markdown'
 
 const REPLY = [
   '# Plan',
@@ -83,24 +83,27 @@ test('a table draws its header in the accent color, cells styled inline', async 
     viewport: { columns: 80, rows: 40 },
   })
 
-  expect((await reply.find({ type: 'Text', text: 'Calls' }))?.props).toMatchObject({ color: 'permission' })
+  const calls = await reply.findAll({ type: 'Text', text: 'Calls' })
+  expect(calls.some(one => one.text === 'Calls' && one.props.color === 'permission')).toBe(true)
   expect((await reply.findAll({ type: 'Text', text: 'fast' })).some(one => one.props.weight === 'bold')).toBe(true)
   expect(await reply.find({ type: 'Text', text: /^╭─+┬─+┬─+╮$/ })).toBeDefined()
 })
 
-test('a table row is exactly as wide as its border', async $ => {
+test('every line of a table is exactly as wide as its border, wrapped cells included', async $ => {
+  const wide = ['| Part | Note |', '|---|---|', `| a | ${'word '.repeat(30)}|`, '| b | short |'].join('\n')
   const reply = await $.ui.mount({
     plugin: 'nebula-ui',
     surface: 'terminal',
     component: 'AssistantMessage',
-    props: { text: TABLE, isFirstOfReply: false },
-    viewport: { columns: 80, rows: 40 },
+    props: { text: wide, isFirstOfReply: false },
+    viewport: { columns: 60, rows: 40 },
   })
-  const top = (await reply.find({ type: 'Text', text: /^╭/ }))!.text
-  const cells = (await reply.findAll({ type: 'Box' })).filter(box => typeof box.props.width === 'number' && box.props.position === 'relative')
-  const header = cells.slice(0, 3).reduce((sum, box) => sum + (box.props.width as number), 0)
+  const drawn = (await reply.findAll({ type: 'Text', text: /^[╭│├╰]/ })).filter(one => one.text.length > 1 && /[╮│┤╯]$/.test(one.text))
+  const widths = new Set(drawn.map(one => [...one.text].length))
 
-  expect(header).toBe([...top].length)
+  expect(drawn.length).toBeGreaterThan(5)
+  expect(widths.size).toBe(1)
+  expect([...widths][0]).toBeLessThanOrEqual(56)
 })
 
 test('a short code frame names no length, a long one does', async $ => {
@@ -119,4 +122,36 @@ test('a short code frame names no length, a long one does', async $ => {
 
   expect(await short.find({ type: 'Text', text: /line/ })).toBeUndefined()
   expect(await long.find({ type: 'Text', text: /6 lines/ })).toBeDefined()
+})
+
+test("wrapping keeps styles across breaks, a line's indentation, and cuts a word longer than a row", async () => {
+  expect(wrapSpans([{ text: 'one two three', style: 'bold' }], 8)).toEqual([
+    [{ text: 'one two', style: 'bold' }],
+    [{ text: 'three', style: 'bold' }],
+  ])
+  expect(wrapText('  - nested item', 40)).toEqual([[{ text: '  - nested item', style: 'plain' }]])
+  expect(wrapSpans([{ text: 'abcdefghij', style: 'plain' }], 4).map(row => row[0]?.text)).toEqual(['abcd', 'efgh', 'ij'])
+  expect(wrapText('see `code` here', 40)).toEqual([
+    [
+      { text: 'see ', style: 'plain' },
+      { text: 'code', style: 'code' },
+      { text: ' here', style: 'plain' },
+    ],
+  ])
+})
+
+test('a prompt and a quote are drawn as rows of text, one bar glyph each, nothing placed absolutely', async $ => {
+  const prompt = await $.ui.mount({
+    plugin: 'nebula-ui',
+    surface: 'terminal',
+    component: 'UserMessage',
+    props: { text: `${'word '.repeat(30)}\nsecond line`, origin: { kind: 'composer' }, isExpanded: true },
+    viewport: { columns: 40, rows: 24 },
+  })
+  const rows = await prompt.findAll({ type: 'Text', text: /^▌ / })
+  const boxes = await prompt.findAll({ type: 'Box' })
+
+  expect(rows.length).toBeGreaterThanOrEqual(5)
+  expect(rows.every(row => [...row.text].length <= 40)).toBe(true)
+  expect(boxes.some(box => box.props.position === 'absolute')).toBe(false)
 })
