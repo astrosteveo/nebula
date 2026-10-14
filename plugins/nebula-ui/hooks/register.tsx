@@ -40,6 +40,9 @@ const toggle = async ($: EngineInterface, site: Site) => {
   await $.store.set('disabled', list)
 }
 
+/** What the engine's spinner draws in place of its word, which nebula-ui draws in a pill. */
+const BLANK_WORD = '\u00a0'
+
 /** The pill before the spinner line: what the turn is doing, by the spinner's mode. */
 const SPINNER_MODES = {
   requesting: { glyph: '⇅', label: 'connecting', color: 'inactive' },
@@ -677,16 +680,29 @@ export const register: Register = on => {
     }
     const { Box, Text } = $.ui.resolve(e)
     const mode = SPINNER_MODES[e.props.mode]
+    const shown = e.props.message ?? e.props.word
+    const word = shown.endsWith('…') ? shown : `${shown}…`
+    // The word moves into a pill of its own; the engine still draws its glyph, time and tokens. An empty word
+    // makes the engine sample one of its own, so it gets a no-break space: not empty, drawn blank.
+    const engine = await next({
+      ...e,
+      props: { ...e.props, word: BLANK_WORD, message: e.props.message === null ? null : BLANK_WORD, suffix: '' },
+    })
 
+    // The engine's line keeps a blank row above itself; aligning to the bottom seats the pills beside its text.
     return (
-      <Box flexDirection="row" gap={1}>
+      <Box flexDirection="row" alignItems="flex-end" gap={1}>
         <Box flexShrink={0}>
           <Text inverse weight="bold" color={mode.color}>
             {' '}
             {mode.glyph} {mode.label}{' '}
           </Text>
+          <Text inverse weight="bold" color="claude">
+            {' '}
+            {word}{' '}
+          </Text>
         </Box>
-        {await next(e)}
+        {engine}
       </Box>
     )
   })
