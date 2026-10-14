@@ -24,6 +24,7 @@ const SITES = [
   { id: 'PromptHint', label: 'Hint tail', about: 'a /nebula mark in the hint line' },
   { id: 'ToolProgress', label: 'Background hint', about: 'a compact ctrl+b hint' },
   { id: 'AbovePrompt', label: 'Dashboard band', about: 'model, branch, context, limits, cost above the prompt' },
+  { id: 'CommandOutput', label: 'Command output', about: 'what a slash command printed, behind an accent bar' },
 ] as const
 
 type Site = (typeof SITES)[number]['id']
@@ -338,6 +339,9 @@ const detail = (ui: Ui, columns: number, tool: string, output: unknown, isErrore
   return frame(code(shown.text, { language: 'json' }), 'json', shown.note)
 }
 
+/** The origins of rows the person wrote: typed, from the phone, or a slash command's echo (unstamped). */
+const OWN_ORIGINS = new Set(['composer', 'bridge', 'unclassified'])
+
 /** Columns a tool row leaves free at the right, so a trimmed row never wraps. */
 const ROW_MARGIN = 4
 
@@ -449,13 +453,25 @@ export const register: Register = on => {
     }
     const { Box, Text } = $.ui.resolve(e)
 
-    if (e.props.origin.kind === 'composer') {
+    const isOwn = e.props.task === undefined && e.props.from === undefined && OWN_ORIGINS.has(e.props.origin.kind)
+    if (isOwn) {
+      const command = /^(\/\S+)([\s\S]*)$/.exec(e.props.text)
+
       return (
         <Box position="relative" marginTop={1} paddingLeft={2}>
           <Box position="absolute" top={0} bottom={0} left={0} width={1} overflow="hidden">
             <Text color={ACCENT}>{'▌\n'.repeat(BAR_ROWS)}</Text>
           </Box>
-          <Text>{e.props.text}</Text>
+          {command === null ? (
+            <Text>{e.props.text}</Text>
+          ) : (
+            <Text>
+              <Text weight="bold" color={ACCENT}>
+                {command[1]}
+              </Text>
+              {command[2]}
+            </Text>
+          )}
         </Box>
       )
     }
@@ -628,6 +644,28 @@ export const register: Register = on => {
         <Box paddingLeft={2} flexDirection="column">
           {await next({ ...e, props: { ...e.props, isExpanded: true } })}
         </Box>
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    if (e.surface !== 'terminal' || e.props.text.trim() === '' || !(await isOn($, 'CommandOutput'))) {
+      return next(e)
+    }
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Markdown } = ui
+    const { bar } = kit(ui, e.viewport?.columns ?? 80)
+    const { text, isErrored } = e.props
+
+    return (
+      <Box position="relative" flexDirection="column" marginLeft={2} paddingLeft={2}>
+        {bar(isErrored ? 'error' : ACCENT, '▎')}
+        {isErrored && (
+          <Text weight="bold" color="error">
+            ✗ failed
+          </Text>
+        )}
+        <Markdown text={text} />
       </Box>
     )
   })

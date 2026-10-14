@@ -23,6 +23,7 @@ A modern restyle of Claude Code's terminal UI, built only on the mods API. Every
 | Mode chips | Footer modes as `◉ focus` |
 | Hint tail | `✦ /nebula` at the end of the hint line |
 | Background hint | A shorter `⇣ ctrl+b to run in background` |
+| Command output | What a slash command printed, behind an accent bar (red with `✗ failed` for an error) instead of a dim `⎿` line |
 | Dashboard band | Model, git branch and changes, context gauge, rate-limit windows with reset times, cost and session age, above the prompt |
 
 Colors follow your theme: the mod paints with theme keys (`permission` as its accent), not fixed colors.
@@ -30,6 +31,7 @@ Colors follow your theme: the mod paints with theme keys (`permission` as its ac
 ## Limits
 
 - The terminal surface only; the desktop app, VS Code and mobile draw as before.
+- The echo of a local slash command (`/plugin`, `/reload-plugins`) keeps the engine's grey row: the API exposes no site for it.
 - The engine's own click-to-expand on a tool row can't be followed by a mod, so nebula-ui's rows expand with their own toggle.
 - A setext heading (text underlined with `---`) is read as a horizontal rule.
 

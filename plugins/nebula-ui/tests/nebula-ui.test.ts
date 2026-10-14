@@ -93,3 +93,46 @@ test('a long target is trimmed so the whole row stays one clickable line', async
   expect(line).toContain('…')
   expect(line).toContain('file.ts')
 })
+
+test('a slash command echo gets the prompt bar, the command in the accent color', async $ => {
+  const row = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'UserMessage',
+    props: { text: '/plugin install nebula-ui', origin: { kind: 'unclassified' }, isExpanded: true },
+  })
+
+  const runs = await row.findAll({ type: 'Text', text: '/plugin' })
+  expect(runs.some(run => run.text === '/plugin' && run.props.color === 'permission')).toBe(true)
+  expect(await row.find({ type: 'Text', text: /▌/ })).toBeDefined()
+})
+
+test('a teammate message is left to the engine', async $ => {
+  const mount = $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'UserMessage',
+    props: { text: 'hi', origin: { kind: 'peer' }, isExpanded: false, from: { name: 'reviewer' } },
+  })
+
+  await expect(mount).rejects.toThrow(/no implementation for ui.render/)
+})
+
+test('a command prints behind an accent bar, an error behind a red one', async $ => {
+  const props = { command: 'reload-plugins', args: '', text: 'Reloaded: 5 plugins', isErrored: false }
+  const done = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'CommandOutput', props })
+
+  expect(await done.find({ type: 'Markdown', text: 'Reloaded: 5 plugins' })).toBeDefined()
+  expect((await done.find({ type: 'Text', text: /▎/ }))?.props).toMatchObject({ color: 'permission' })
+  expect(await done.find({ type: 'Text', text: /✗/ })).toBeUndefined()
+
+  const failed = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'CommandOutput',
+    props: { ...props, text: 'No such plugin', isErrored: true },
+  })
+
+  expect((await failed.find({ type: 'Text', text: /▎/ }))?.props).toMatchObject({ color: 'error' })
+  expect(await failed.find({ type: 'Text', text: /✗ failed/ })).toBeDefined()
+})
