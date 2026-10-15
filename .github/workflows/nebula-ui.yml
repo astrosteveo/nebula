@@ -1,0 +1,46 @@
+name: nebula-ui
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/**'
+      - '.claude-plugin/**'
+      - '.github/workflows/nebula-ui.yml'
+  pull_request:
+    paths:
+      - 'plugins/**'
+      - '.claude-plugin/**'
+      - '.github/workflows/nebula-ui.yml'
+
+jobs:
+  check:
+    name: validate and test (Claude Code ${{ matrix.claude }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 2.1.300 is the version nebula-ui is built and tested on, and gates the change. The mods API is
+        # early access, so `latest` runs beside it as an early warning and may fail without failing CI.
+        claude: ['2.1.300', 'latest']
+    continue-on-error: ${{ matrix.claude == 'latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        run: |
+          npm install --global "@anthropic-ai/claude-code@${{ matrix.claude }}"
+          claude --version
+
+      - name: Validate the marketplace
+        run: claude plugin validate .
+
+      - name: Validate nebula-ui
+        run: claude plugin validate plugins/nebula-ui
+
+      - name: Test nebula-ui
+        run: claude plugin test plugins/nebula-ui

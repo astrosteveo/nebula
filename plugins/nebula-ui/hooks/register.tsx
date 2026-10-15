@@ -23,7 +23,8 @@ import {
   stopAll,
   stopProc,
 } from './procs'
-import { ACCENT } from './theme'
+import { ACCENT, THEMES, THEME_NAMES, isThemeName, setAccent } from './theme'
+import type { ThemeName } from './theme'
 
 const PANEL = 'nebula-ui'
 
@@ -32,6 +33,7 @@ const dash = atom({ plugin: 'nebula-ui', key: 'dash' } as const, null as Dash | 
 const procList = atom({ plugin: 'nebula-ui', key: 'procs' } as const, [] as Proc[])
 const pending = atom({ plugin: 'nebula-ui', key: 'pending' } as const, null as { command: string; origin: string | null } | null)
 const frameWidth = atom({ plugin: 'nebula-ui', key: 'frameWidth' } as const, 'fill' as FrameWidth)
+const theme = atom({ plugin: 'nebula-ui', key: 'theme' } as const, 'terminal' as ThemeName)
 
 /** Lines of a run's output a code frame shows; /procs keeps more. */
 const RUN_LINES = 12
@@ -68,6 +70,19 @@ type Site = (typeof SITES)[number]['id']
 const HOTKEYS = '1234567890abcdefghij'
 const isOn = async ($: EngineInterface, site: Site) => !(await read($, disabled)).includes(site)
 
+/**
+ * Sets the accent from the person's theme before a drawing: the read also makes the drawing redraw
+ * when the theme changes. Every render hook that paints the accent calls it first.
+ */
+const themed = async ($: EngineInterface) => {
+  setAccent(await read($, theme))
+}
+
+const stepTheme = async ($: EngineInterface) => {
+  const name = await update($, theme, now => THEME_NAMES[(THEME_NAMES.indexOf(now) + 1) % THEME_NAMES.length]!)
+  await $.store.set('theme', name)
+}
+
 const stepFrameWidth = async ($: EngineInterface) => {
   const width = await update($, frameWidth, now => {
     const at = FRAME_WIDTHS.indexOf(now)
@@ -91,7 +106,13 @@ const BLANK_WORD = '\u00a0'
 const SPINNER_MODES = {
   requesting: { glyph: '⇅', label: 'connecting', color: 'inactive' },
   responding: { glyph: '✎', label: 'writing', color: 'success' },
-  thinking: { glyph: '✦', label: 'thinking', color: ACCENT },
+  thinking: {
+    glyph: '✦',
+    label: 'thinking',
+    get color() {
+      return ACCENT
+    },
+  },
   'tool-input': { glyph: '⋯', label: 'preparing', color: 'suggestion' },
   'tool-use': { glyph: '⚙', label: 'running tools', color: 'suggestion' },
 } as const
@@ -188,7 +209,13 @@ const duration = (ms: number) => {
 const CALLOUTS: Record<Callout, { glyph: string; color: string; title: string }> = {
   note: { glyph: 'ℹ', color: 'suggestion', title: 'Note' },
   tip: { glyph: '✦', color: 'success', title: 'Tip' },
-  important: { glyph: '◆', color: ACCENT, title: 'Important' },
+  important: {
+    glyph: '◆',
+    get color() {
+      return ACCENT
+    },
+    title: 'Important',
+  },
   warning: { glyph: '▲', color: 'warning', title: 'Warning' },
   caution: { glyph: '✗', color: 'error', title: 'Caution' },
 }
@@ -625,6 +652,10 @@ export const register: Register = on => {
       name: 'nebula',
       description: 'Open the Nebula UI panel to switch each restyled part on or off',
     })
+    const savedTheme = await $.store.get('theme')
+    if (isThemeName(savedTheme)) {
+      await update($, theme, () => savedTheme)
+    }
     const savedWidth = await $.store.get('frameWidth')
     if (isFrameWidth(savedWidth)) {
       await update($, frameWidth, () => savedWidth)
@@ -689,6 +720,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || e.props.hasSurvey || !(await isOn($, 'AbovePrompt'))) {
       return next(e)
     }
@@ -768,6 +800,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PROCS_PANE }, async ($, e) => {
+    await themed($)
     if (e.surface !== 'terminal') {
       const { Text } = $.ui.resolve(e)
 
@@ -786,6 +819,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    await themed($)
     if (!e.requestId.startsWith(FOLLOW_PANE) || e.surface !== 'terminal') {
       return next(e)
     }
@@ -803,6 +837,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: RUN_PANE }, async ($, e) => {
+    await themed($)
     const { Box, Text, Button } = $.ui.resolve(e)
     const asked = await read($, pending)
     const cwd = await $.session.cwd()
@@ -864,9 +899,11 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANEL }, async ($, e) => {
+    await themed($)
     const { Box, Text, Button } = $.ui.resolve(e)
     const off = await read($, disabled)
     const width = await read($, frameWidth)
+    const themeName = await read($, theme)
 
     return (
       <Box flexDirection="column">
@@ -887,6 +924,12 @@ export const register: Register = on => {
           })}
         </Box>
         <Box marginTop={1}>
+          <Button key="theme" plain hotkey="t" onPress={() => stepTheme($)}>
+            <Text color={ACCENT}>●</Text> Accent <Text weight="bold">{themeName}</Text>{' '}
+            <Text dimColor>{THEMES[themeName].about} (t to change: {THEME_NAMES.join(', ')})</Text>
+          </Button>
+        </Box>
+        <Box>
           <Button key="frame-width" plain hotkey="w" onPress={() => stepFrameWidth($)}>
             <Text color={ACCENT}>▭</Text> Frame width <Text weight="bold">{String(width)}</Text>{' '}
             <Text dimColor>code and output frames: fill, fit to their content, or a width in columns (w to change)</Text>
@@ -897,6 +940,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || !(await isOn($, 'UserMessage'))) {
       return next(e)
     }
@@ -938,6 +982,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || e.props.isSummary === true || !(await isOn($, 'AssistantMessage'))) {
       return next(e)
     }
@@ -1104,6 +1149,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || !(await isOn($, 'ToolUse'))) {
       return next(e)
     }
@@ -1153,6 +1199,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    await themed($)
     const { tool_use_id, tool, output, isErrored } = e.props
     if (e.surface !== 'terminal' || ENGINE_RESULTS.has(tool) || !(await isOn($, 'ToolUse'))) {
       return next(e)
@@ -1184,6 +1231,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || e.props.isExpanded || !(await isOn($, 'ToolGroup'))) {
       return next(e)
     }
@@ -1233,6 +1281,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || e.props.text.trim() === '' || !(await isOn($, 'CommandOutput'))) {
       return next(e)
     }
@@ -1261,6 +1310,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || !(await isOn($, 'Spinner'))) {
       return next(e)
     }
@@ -1297,6 +1347,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || !(await isOn($, 'TurnDuration'))) {
       return next(e)
     }
@@ -1320,6 +1371,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'InfoNotice' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || !(await isOn($, 'InfoNotice'))) {
       return next(e)
     }
@@ -1336,6 +1388,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || e.props.modes.length === 0 || !(await isOn($, 'SessionMode'))) {
       return next(e)
     }
@@ -1351,6 +1404,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || e.props.isDraft || !(await isOn($, 'PromptHint'))) {
       return next(e)
     }
@@ -1359,6 +1413,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'ToolProgress' }, async ($, e, next) => {
+    await themed($)
     if (e.surface !== 'terminal' || e.props.kind !== 'background_hint' || !(await isOn($, 'ToolProgress'))) {
       return next(e)
     }

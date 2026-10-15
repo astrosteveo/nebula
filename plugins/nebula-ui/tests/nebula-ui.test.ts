@@ -352,3 +352,38 @@ test('a click on a slash command in a reply fills the prompt; a shell command as
   await dialog.press({ key: 'copy' })
   expect(copied).toBe('npm run dev')
 })
+
+test('the accent preset recolors what nebula-ui draws, tables built at load included', async ($, on) => {
+  mock.store(on)
+  const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'nebula-ui', props: panel })
+  const barColor = async () => {
+    const row = await $.ui.mount({
+      plugin: PLUGIN,
+      surface: 'terminal',
+      component: 'UserMessage',
+      props: { text: 'hi', origin: { kind: 'composer' }, isExpanded: true },
+    })
+
+    return (await row.findAll({ type: 'Text', text: '▌ ' })).find(one => one.text === '▌ ')?.props.color
+  }
+
+  expect(await barColor()).toBe('permission')
+  expect((await pane.find({ key: 'theme' }))?.text).toContain('Accent terminal')
+
+  await pane.press({ key: 'theme' })
+  expect((await pane.find({ key: 'theme' }))?.text).toContain('Accent claude')
+  expect(await barColor()).toBe('claude')
+
+  await pane.press({ key: 'theme' })
+  expect((await pane.find({ key: 'theme' }))?.text).toContain('Accent nebula')
+  expect(await barColor()).toBe('#b4befe')
+
+  const callout = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    props: { text: '> [!IMPORTANT]\n> Read this.', isFirstOfReply: false },
+  })
+  const titles = await callout.findAll({ type: 'Text', text: /◆ Important/ })
+  expect(titles.some(one => one.props.color === '#b4befe')).toBe(true)
+})

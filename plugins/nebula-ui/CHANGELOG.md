@@ -4,6 +4,13 @@ All notable changes to nebula-ui. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-10-14
+
+### Added
+
+- Accent presets in `/nebula` (key `t`): `terminal` follows your Claude Code theme, as before; `claude` is Claude's orange, also from your theme; `nebula`, `ember`, `mint`, `rose` and `gold` are fixed colors; `mono` uses your text color. The choice is kept across sessions.
+- CI: every push touching the plugin is validated and tested on Claude Code 2.1.300, and on `latest` as an early warning.
+
 ## [0.1.8] - 2026-10-14
 
 The first tagged [release](https://github.com/astrosteveo/nebula/releases/tag/nebula-ui-v0.1.8).
@@ -100,7 +107,8 @@ The first tagged [release](https://github.com/astrosteveo/nebula/releases/tag/ne
 
 - The first version: prompt bars, rich markdown with framed code and redrawn tables, tool rows that open on a click to their output, a dashboard band above the prompt, and touches to the spinner, footer and turn divider. Each part switches on or off from `/nebula`.
 
-[Unreleased]: https://github.com/astrosteveo/nebula/compare/nebula-ui-v0.1.8...HEAD
+[Unreleased]: https://github.com/astrosteveo/nebula/compare/nebula-ui-v0.1.9...HEAD
+[0.1.9]: https://github.com/astrosteveo/nebula/releases/tag/nebula-ui-v0.1.9
 [0.1.8]: https://github.com/astrosteveo/nebula/releases/tag/nebula-ui-v0.1.8
 [0.1.7]: https://github.com/astrosteveo/nebula/commit/cb80b96
 [0.1.6]: https://github.com/astrosteveo/nebula/commit/4ce3dd0

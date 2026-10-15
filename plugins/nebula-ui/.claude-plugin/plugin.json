@@ -1,6 +1,6 @@
 {
   "name": "nebula-ui",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "A modern restyle of Claude Code: prompt bars, rich markdown, clickable tool rows and a live dashboard band, each part switchable from /nebula",
   "author": {
     "name": "Steven Mosley"

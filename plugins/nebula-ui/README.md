@@ -34,9 +34,11 @@ A modern restyle of Claude Code's terminal UI, built only on the mods API. Every
 | Command output | What a slash command printed, behind an accent bar (red with `✗ failed` for an error) instead of a dim `⎿` line |
 | Dashboard band | Model, git branch and changes, context gauge, rate-limit windows with reset times, cost and session age, above the prompt |
 
+**Accent** (in `/nebula`, key `t`): `terminal` follows your Claude Code theme (the default); `claude` is Claude's orange, also from your theme; `nebula`, `ember`, `mint`, `rose` and `gold` are fixed colors; `mono` uses your text color.
+
 **Frame width** (in `/nebula`, key `w`): code and output frames fill the width (the default), fit their content, or hold to 80, 100 or 120 columns.
 
-Colors follow your theme: the mod paints with theme keys (`permission` as its accent), not fixed colors.
+With the `terminal` accent, every color follows your theme: the mod paints with theme keys (`permission` as its accent). The fixed presets suit dark themes best.
 
 ## Limits
 
@@ -52,5 +54,8 @@ Colors follow your theme: the mod paints with theme keys (`permission` as its ac
 See [CHANGELOG.md](CHANGELOG.md) for what each version added, changed and fixed.
 
 ## Developing
+
+CI runs `claude plugin validate` and `claude plugin test` on every push that touches the plugin, on Claude Code 2.1.300 (the gate) and `latest` (an early warning).
+
 
 `claude plugin validate plugins/nebula-ui` and `claude plugin test plugins/nebula-ui` check it; `claude --plugin-dir plugins/nebula-ui` loads it from this folder and reloads it as it changes.

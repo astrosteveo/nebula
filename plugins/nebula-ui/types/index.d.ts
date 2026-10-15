@@ -44,6 +44,8 @@ declare module 'claude-code' {
       dash: Dash | null
       procs: Proc[]
       frameWidth: FrameWidth
+      /** The accent preset (hooks/theme.ts THEMES). */
+      theme: 'terminal' | 'claude' | 'nebula' | 'ember' | 'mint' | 'rose' | 'gold' | 'mono'
       /** The command the run dialog asks about, null while it is closed. */
       pending: { command: string; origin: string | null } | null
     }
