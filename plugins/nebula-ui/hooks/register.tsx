@@ -5,7 +5,24 @@ import type { Dash, Disabled, FrameWidth, Proc } from '../types'
 import { fenceCommand, fitColumns, linkCommands, parse, rowWidth, spans, width, wrapSpans, wrapText } from './markdown'
 import type { Block, Callout, Command, Span } from './markdown'
 import { drawBand, gather } from './dashboard'
-import { PROCS_PANE, TONE, adopt, clearProc, drawProcs, isRunning, startProc, statusWord, stopAll, stopProc } from './procs'
+import {
+  FOLLOW_PANE,
+  PROCS_PANE,
+  TONE,
+  adopt,
+  clearProc,
+  describeOutput,
+  describeProcs,
+  drawFollow,
+  drawProcs,
+  isRunning,
+  outputLine,
+  restartProc,
+  startProc,
+  statusWord,
+  stopAll,
+  stopProc,
+} from './procs'
 import { ACCENT } from './theme'
 
 const PANEL = 'nebula-ui'
@@ -619,6 +636,37 @@ export const register: Register = on => {
       void gather($)
       void adopt($)
     })
+    // Tools for the model, last and on their own: a host that refuses them keeps everything above.
+    try {
+      await $.tool.register({
+        name: 'processes',
+        description:
+          "Lists the commands the user started from nebula-ui (a run button on a code frame, a command clicked in a reply, or process_control), with their status and last lines; with an id, that process's recent output. Use it to check on a dev server or watcher the user is running.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'A process id from the list; leave out to list them all.' },
+            lines: { type: 'integer', minimum: 1, maximum: 200, description: 'Lines of output to return for an id (default 60).' },
+          },
+        },
+      })
+      await $.tool.register({
+        name: 'process_control',
+        description:
+          "Starts, stops or restarts a process in nebula-ui's process manager, where the user sees it in /procs and can stop it. start runs `command` with sh -c in the session's directory, in its own process group; stop ends the whole group; restart runs the same command again.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['start', 'stop', 'restart'] },
+            id: { type: 'string', description: 'The process to stop or restart.' },
+            command: { type: 'string', description: 'The shell command to start.' },
+          },
+          required: ['action'],
+        },
+      })
+    } catch (error) {
+      $.ui.log(`nebula-ui: process tools not registered: ${String(error)}`, { to: 'debug' })
+    }
     // The engine keeps each command's listing for the session; listing them again drops the glyphs an
     // earlier version of nebula-ui gave them, which also reached the model's list of skills.
     void $.ui.invalidate('command.describe')
@@ -657,6 +705,55 @@ export const register: Register = on => {
     return figures === null ? next(e) : drawBand($.ui.resolve(e), figures, chip)
   })
 
+  on('tool.call', { tool: 'mcp__nebula-ui__processes' }, async ($, e) => {
+    const list = await read($, procList)
+    const now = await $.clock.now()
+    const id = typeof e.id === 'string' ? e.id : undefined
+    if (id === undefined) {
+      return { result: describeProcs(list, now) }
+    }
+    const proc = list.find(one => one.id === id)
+    const lines = typeof e.lines === 'number' ? Math.min(200, Math.max(1, Math.round(e.lines))) : 60
+
+    return proc === undefined ? { deny: `No process ${id}; call processes without an id to list them.` } : { result: describeOutput(proc, now, lines) }
+  })
+
+  on('tool.call', { tool: 'mcp__nebula-ui__process_control' }, async ($, e) => {
+    const list = await read($, procList)
+    const id = typeof e.id === 'string' ? e.id : undefined
+    const proc = list.find(one => one.id === id)
+    switch (e.action) {
+      case 'start': {
+        if (typeof e.command !== 'string' || e.command.trim() === '') {
+          return { deny: 'start needs a command.' }
+        }
+        const started = await startProc($, e.command)
+
+        return { result: `Started ${started}: ${e.command}. The user sees it in /procs; read its output with processes.` }
+      }
+      case 'stop':
+        if (proc === undefined) {
+          return { deny: `No process ${id ?? '(no id given)'}.` }
+        }
+        if (!isRunning(proc)) {
+          return { result: `${proc.id} had already ${proc.status}.` }
+        }
+        await stopProc($, proc.id)
+
+        return { result: `Stopped ${proc.id} and its process group.` }
+      case 'restart': {
+        if (proc === undefined) {
+          return { deny: `No process ${id ?? '(no id given)'}.` }
+        }
+        const restarted = await restartProc($, proc.id)
+
+        return { result: `Restarted as ${restarted}: ${proc.command}.` }
+      }
+      default:
+        return { deny: 'action is start, stop or restart.' }
+    }
+  })
+
   on('session.end', async ($, e, next) => {
     // A process started from a reply ends with the session, its children too.
     await stopAll($)
@@ -681,8 +778,27 @@ export const register: Register = on => {
 
     return drawProcs($.ui.resolve(e), list, now, e.props.bodyColumns, {
       stop: id => void stopProc($, id),
+      restart: id => void restartProc($, id),
+      follow: proc => void $.ui.open({ id: `${FOLLOW_PANE}${proc.id}`, title: fit(proc.command, 32, false) }),
       clear: id => void clearProc($, id),
       clearEnded: () => void update($, procList, all => all.filter(isRunning)),
+    })
+  })
+
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    if (!e.requestId.startsWith(FOLLOW_PANE) || e.surface !== 'terminal') {
+      return next(e)
+    }
+    const id = e.requestId.slice(FOLLOW_PANE.length)
+    const proc = (await read($, procList)).find(one => one.id === id)
+    const now = (await read($, dash))?.now ?? 0
+
+    return drawFollow($.ui.resolve(e), proc, now, e.props.scroll.bodyRows, {
+      stop: () => void stopProc($, id),
+      restart: () =>
+        void restartProc($, id).then(fresh =>
+          fresh === null ? undefined : $.ui.open({ id: `${FOLLOW_PANE}${fresh}`, title: e.props.title }),
+        ),
     })
   })
 
@@ -825,7 +941,8 @@ export const register: Register = on => {
     if (e.surface !== 'terminal' || e.props.isSummary === true || !(await isOn($, 'AssistantMessage'))) {
       return next(e)
     }
-    const { Box, Text, Markdown, Button } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Markdown, Button } = ui
     const { line, barred, frame, code, inline, table } = kit($.ui.resolve(e), (e.viewport?.columns ?? 80) - 3, await read($, frameWidth))
     const isClickable = await isOn($, 'ClickCommands')
     const started = isClickable ? await read($, procList) : []
@@ -906,9 +1023,7 @@ export const register: Register = on => {
           <Text color={tone.color}>
             {tone.glyph} {statusWord(proc, now)}
           </Text>
-          {lines.slice(-RUN_LINES).map(one => (
-            <Text wrap="truncate-end">{one}</Text>
-          ))}
+          {lines.slice(-RUN_LINES).map(one => outputLine(ui, one))}
         </Box>
       )
     }
@@ -1162,10 +1277,11 @@ export const register: Register = on => {
       props: { ...e.props, word: BLANK_WORD, message: e.props.message === null ? null : BLANK_WORD, suffix: '' },
     })
 
-    // The engine's line keeps a blank row above itself; aligning to the bottom seats the pills beside its text.
+    // The engine's spinner is a blank row, its line, then sometimes a tip under it: the pills sit one row down,
+    // beside the line, whatever follows it.
     return (
-      <Box flexDirection="row" alignItems="flex-end" gap={1}>
-        <Box flexShrink={0}>
+      <Box flexDirection="row" alignItems="flex-start" gap={1}>
+        <Box flexShrink={0} marginTop={1}>
           <Text inverse weight="bold" color={mode.color}>
             {' '}
             {mode.glyph} {mode.label}{' '}

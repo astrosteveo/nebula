@@ -217,12 +217,19 @@ export const isRunning = (proc: Proc) => proc.status === 'running' || proc.statu
 
 /** The Processes pane: each process, newest first, with its last lines and its controls. */
 export const drawProcs = (
-  { Box, Text, Button }: Elements['terminal'],
+  ui: Elements['terminal'],
   list: Proc[],
   now: number,
   columns: number,
-  act: { stop: (id: string) => void; clear: (id: string) => void; clearEnded: () => void },
+  act: {
+    stop: (id: string) => void
+    restart: (id: string) => void
+    follow: (proc: Proc) => void
+    clear: (id: string) => void
+    clearEnded: () => void
+  },
 ) => {
+  const { Box, Text, Button } = ui
   if (list.length === 0) {
     return (
       <Box flexDirection="column">
@@ -259,11 +266,18 @@ export const drawProcs = (
               </Box>
               <Box flexShrink={0} gap={1}>
                 <Text color={tone.color}>{statusWord(proc, now)}</Text>
-                {isRunning(proc) ? (
+                {isRunning(proc) && (
                   <Button key={`stop-${proc.id}`} plain onPress={() => act.stop(proc.id)}>
                     <Text color="error">■ stop</Text>
                   </Button>
-                ) : (
+                )}
+                <Button key={`restart-${proc.id}`} plain onPress={() => act.restart(proc.id)}>
+                  <Text color="success">↻</Text>
+                </Button>
+                <Button key={`follow-${proc.id}`} plain onPress={() => act.follow(proc)}>
+                  <Text color={ACCENT}>⤢</Text>
+                </Button>
+                {!isRunning(proc) && (
                   <Button key={`clear-${proc.id}`} plain onPress={() => act.clear(proc.id)}>
                     <Text dimColor>✕</Text>
                   </Button>
@@ -271,13 +285,113 @@ export const drawProcs = (
               </Box>
             </Box>
             {shown.map(line => (
-              <Text dimColor wrap="truncate-end">
-                <Text color={ACCENT}>▏</Text> {line.slice(0, room)}
-              </Text>
+              <Box flexDirection="row">
+                <Text color={ACCENT}>▏ </Text>
+                {outputLine(ui, line.slice(0, room))}
+              </Box>
             ))}
           </Box>
         )
       })}
+    </Box>
+  )
+}
+
+/** Starts a process again with the command and frame it ran from, stopping it first if it still runs. */
+export async function restartProc($: EngineInterface, id: string) {
+  const proc = (await read($, procs)).find(one => one.id === id)
+  if (proc === undefined) {
+    return null
+  }
+  if (isRunning(proc)) {
+    await stopProc($, id)
+    for (let waited = 0; live.has(id) && waited < 5000; waited += 100) {
+      await $.clock.sleep(100)
+    }
+  }
+
+  return startProc($, proc.command, proc.origin)
+}
+
+/** The processes as the model reads them: one line each, newest first, with their last lines. */
+export const describeProcs = (list: Proc[], now: number) =>
+  list.length === 0
+    ? 'No processes have been started from nebula-ui in this session.'
+    : list
+        .map(proc =>
+          [
+            `${proc.id}  ${proc.status}  ${statusWord(proc, now)}  in ${proc.cwd}`,
+            `  $ ${proc.command}`,
+            ...proc.tail.filter(line => line.trim() !== '').slice(-3).map(line => `  | ${line}`),
+          ].join('\n'),
+        )
+        .join('\n\n')
+
+/** One process's output as the model reads it: its status, then its last `lines` lines. */
+export const describeOutput = (proc: Proc, now: number, lines: number) =>
+  [
+    `${proc.id}  ${proc.status}  ${statusWord(proc, now)}  in ${proc.cwd}`,
+    `$ ${proc.command}`,
+    '',
+    ...(proc.tail.length === 0 ? ['(no output yet)'] : proc.tail.slice(-lines)),
+  ].join('\n')
+
+const URL = /https?:\/\/[^\s)\]'"<>`]+/g
+
+/** A line of output with each URL a link (a server's 0.0.0.0 opened as localhost). */
+export const outputLine = ({ Text, Link }: Elements['terminal'], line: string) => {
+  const parts: Array<string | { url: string }> = []
+  let at = 0
+  for (const found of line.matchAll(URL)) {
+    parts.push(line.slice(at, found.index), { url: found[0] })
+    at = found.index + found[0].length
+  }
+  parts.push(line.slice(at))
+
+  return (
+    <Text wrap="truncate-end">
+      {parts.map(part =>
+        typeof part === 'string' ? part : <Link href={part.url.replace('//0.0.0.0', '//localhost')}>{part.url}</Link>,
+      )}
+    </Text>
+  )
+}
+
+export const FOLLOW_PANE = 'nebula-proc:'
+
+/** A pane following one process: its status and controls, then as many of its last lines as fit. */
+export const drawFollow = (
+  ui: Elements['terminal'],
+  proc: Proc | undefined,
+  now: number,
+  rows: number,
+  act: { stop: () => void; restart: () => void },
+) => {
+  const { Box, Text, Button } = ui
+  if (proc === undefined) {
+    return <Text dimColor>That process is no longer listed.</Text>
+  }
+  const tone = TONE[proc.status]
+
+  return (
+    <Box flexDirection="column">
+      <Box flexDirection="row" gap={2}>
+        <Text color={tone.color}>
+          {tone.glyph} {statusWord(proc, now)}
+        </Text>
+        {isRunning(proc) && (
+          <Button key="stop" plain hotkey="s" onPress={act.stop}>
+            <Text color="error">■ stop</Text>
+          </Button>
+        )}
+        <Button key="restart" plain hotkey="r" onPress={act.restart}>
+          <Text color="success">↻ restart</Text>
+        </Button>
+      </Box>
+      <Text dimColor wrap="truncate-end">
+        $ {proc.command} · {proc.cwd}
+      </Text>
+      {proc.tail.slice(-Math.max(1, rows - 2)).map(line => outputLine(ui, line))}
     </Box>
   )
 }
