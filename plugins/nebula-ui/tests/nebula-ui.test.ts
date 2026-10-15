@@ -60,7 +60,7 @@ test('the panel switches a part off and back on', async ($, on) => {
   expect((await pane.find({ key: 'ToolUse' }))?.text).toContain('◉ Tool rows')
 })
 
-test('a finished row opens on its chevron to show what the tool returned', async $ => {
+test('a finished Bash row starts open on what it printed, and a click closes it', async $ => {
   const row = await $.ui.mount({
     plugin: PLUGIN,
     surface: 'terminal',
@@ -68,14 +68,29 @@ test('a finished row opens on its chevron to show what the tool returned', async
     props: { ...bashRow, isRunning: false, output: { stdout: 'ok\nall good', stderr: '', interrupted: false } },
   })
 
-  expect(await row.find({ type: 'Text', text: /▸ Bash/ })).toBeDefined()
-  expect(await row.find({ type: 'Text', text: '2 lines' })).toBeDefined()
-  expect(await row.find({ type: 'Code' })).toBeUndefined()
+  expect(await row.find({ type: 'Text', text: /▾ Bash/ })).toBeDefined()
+  expect((await row.find({ type: 'Code' }))?.props).toMatchObject({ source: 'ok\nall good' })
+  expect((await row.find({ type: 'Button' }))?.text).not.toContain('2 lines')
 
   await row.press({ key: 'open-toolu_1' })
-  expect(await row.find({ type: 'Text', text: /▾ Bash/ })).toBeDefined()
-  expect((await row.find({ type: 'Button' }))?.text).not.toContain('2 lines')
-  expect((await row.find({ type: 'Code' }))?.props).toMatchObject({ source: 'ok\nall good' })
+  expect(await row.find({ type: 'Text', text: /▸ Bash/ })).toBeDefined()
+  expect(await row.find({ type: 'Code' })).toBeUndefined()
+  expect((await row.find({ type: 'Button' }))?.text).toContain('2 lines')
+})
+
+test('with Open shell output off, a Bash row starts closed', async ($, on) => {
+  mock.store(on)
+  const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'nebula-ui', props: panel })
+  await pane.press({ key: 'ShellOpen' })
+  const row = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: { ...bashRow, tool_use_id: 'toolu_9', isRunning: false, output: { stdout: 'ok', stderr: '', interrupted: false } },
+  })
+
+  expect(await row.find({ type: 'Text', text: /▸ Bash/ })).toBeDefined()
+  expect(await row.find({ type: 'Code' })).toBeUndefined()
 })
 
 test('a long target is trimmed so the whole row stays one clickable line', async $ => {
@@ -169,7 +184,10 @@ const edited = {
   },
 }
 
-test('a result block keeps only what the row cannot say, and a click on it opens the row', async $ => {
+test('a result block keeps only what the row cannot say, and a click on it opens the row', async ($, on) => {
+  mock.store(on)
+  const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'nebula-ui', props: panel })
+  await pane.press({ key: 'ShellOpen' })
   const quiet = await $.ui.mount({
     plugin: PLUGIN,
     surface: 'terminal',
@@ -197,7 +215,6 @@ test('an opened Bash row shows each file it changed as a diff', async $ => {
     component: 'ToolUse',
     props: { ...bashRow, tool_use_id: 'toolu_4', isRunning: false, output: edited },
   })
-  await row.press({ key: 'open-toolu_4' })
   const codes = await row.findAll({ type: 'Code' })
 
   expect(codes.map(code => code.props.format)).toEqual(['source', 'diff'])
@@ -216,7 +233,6 @@ test('an opened Bash row leaves out the notes the engine adds to stderr', async 
       output: { stdout: 'done', stderr: '\nShell cwd was reset to /repo', interrupted: false },
     },
   })
-  await row.press({ key: 'open-toolu_5' })
 
   expect(await row.find({ type: 'Text', text: /stderr/ })).toBeUndefined()
   expect(await row.find({ type: 'Text', text: /cwd was reset/ })).toBeUndefined()
@@ -272,18 +288,21 @@ test("an Agent's result block is left to the engine", async $ => {
   await expect(mount).rejects.toThrow(/no implementation for ui.render/)
 })
 
-test('the command menu marks each command by where it comes from', async ($, on) => {
-  on('command.describe', ($, e) => ({ description: e.description, isHidden: e.isHidden }))
-  const listed = async (plugin: string) =>
-    $.command.describe({
-      command: 'x',
-      description: 'Does x',
-      isHidden: false,
-      immediate: false,
-      provider: { plugin, tier: plugin === 'engine' ? 'core' : 'plugin' },
-    } as Parameters<typeof $.command.describe>[0])
+test('a tool error printed in color draws as plain text', async $ => {
+  const row = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    props: {
+      ...bashRow,
+      tool_use_id: 'toolu_10',
+      isRunning: false,
+      isErrored: true,
+      output: 'Exit code 1\n\u001b[31m[bat error]\u001b[0m: missing.md: No such file\r\n',
+    },
+  })
+  const drawn = (await row.findAll({ type: 'Text' })).map(one => one.text).join('\n')
 
-  expect(await listed('engine')).toMatchObject({ description: '◆ Does x' })
-  expect(await listed('gdh')).toMatchObject({ description: '◇ Does x' })
-  expect(await listed('nebula-ui')).toMatchObject({ description: '✦ Does x' })
+  expect(drawn).toContain('[bat error]: missing.md: No such file')
+  expect(drawn).not.toMatch(/[\u0000-\u0008\u000b-\u001f]/)
 })

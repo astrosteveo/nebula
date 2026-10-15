@@ -25,7 +25,7 @@ const SITES = [
   { id: 'ToolProgress', label: 'Background hint', about: 'a compact ctrl+b hint' },
   { id: 'AbovePrompt', label: 'Dashboard band', about: 'model, branch, context, limits, cost above the prompt' },
   { id: 'CommandOutput', label: 'Command output', about: 'what a slash command printed, behind an accent bar' },
-  { id: 'CommandMenu', label: 'Command menu', about: 'a glyph per command: ◆ built-in, ◇ plugin, ✦ nebula-ui' },
+  { id: 'ShellOpen', label: 'Open shell output', about: 'Bash rows and Shell groups start open; a click still closes them' },
 ] as const
 
 type Site = (typeof SITES)[number]['id']
@@ -39,10 +39,6 @@ const toggle = async ($: EngineInterface, site: Site) => {
     off.includes(site) ? off.filter(one => one !== site) : [...off, site],
   )
   await $.store.set('disabled', list)
-  if (site === 'CommandMenu') {
-    // The engine keeps each command's listing for the session; this asks it to list them again.
-    await $.ui.invalidate('command.describe')
-  }
 }
 
 /** What the engine's spinner draws in place of its word, which nebula-ui draws in a pill. */
@@ -84,7 +80,14 @@ const TARGETS: Record<string, string> = {
 
 const PATHLIKE = new Set(['Read', 'Edit', 'Write', 'NotebookEdit', 'WebFetch'])
 
-const oneLine = (text: string) => text.split('\n')[0]!.replace(/\s+/g, ' ').trim()
+/** Terminal color and cursor codes (`ESC[31m`) a tool printed: drawn text admits no control characters but tab and newline. */
+const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g
+
+/** Text from a tool, safe to draw: color codes gone, other control characters but tab and newline dropped. */
+const printable = (text: string) =>
+  text.replace(ANSI, '').replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+
+const oneLine = (text: string) => printable(text).split('\n')[0]!.replace(/\s+/g, ' ').trim()
 
 /** What the call acts on, in one line: Bash's command, Read's path, a search's pattern. */
 /** Leading `cd dir &&`, `cd dir;` and `NAME=value;` steps, which say where a command runs, not what it does. */
@@ -180,7 +183,7 @@ const lineCount = (source: string) => plural(source === '' ? 0 : source.split('\
 
 /** The first `DETAIL_LINES` lines of `text`, and a note naming how many were left out. */
 const clip = (text: string) => {
-  const lines = text.replace(/\n+$/, '').split('\n')
+  const lines = printable(text).replace(/\n+$/, '').split('\n')
   const hidden = lines.length - DETAIL_LINES
 
   return {
@@ -192,7 +195,7 @@ const clip = (text: string) => {
 const field = (value: unknown, key: string): unknown =>
   typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[key] : undefined
 
-const text = (value: unknown) => (typeof value === 'string' ? value : '')
+const text = (value: unknown) => (typeof value === 'string' ? printable(value) : '')
 
 type EditedFile = { path: string; diff: string; added: number; removed: number }
 
@@ -569,7 +572,8 @@ export const register: Register = on => {
     })
     void gather($)
     $.clock.every(15_000, () => void gather($))
-    // Commands the engine listed before this load keep their old descriptions until it lists them again.
+    // The engine keeps each command's listing for the session; listing them again drops the glyphs an
+    // earlier version of nebula-ui gave them, which also reached the model's list of skills.
     void $.ui.invalidate('command.describe')
 
     return next(e)
@@ -596,17 +600,6 @@ export const register: Register = on => {
     const figures = await read($, dash)
 
     return figures === null ? next(e) : drawBand($.ui.resolve(e), figures)
-  })
-
-  on('command.describe', async ($, e, next) => {
-    const listed = await next(e)
-    if (!(await isOn($, 'CommandMenu'))) {
-      return listed
-    }
-    // The menu draws descriptions in its own colors, so a glyph is the decoration a mod can give it.
-    const glyph = e.provider.plugin === 'engine' ? '◆' : e.provider.plugin === $.plugin.name ? '✦' : '◇'
-
-    return { ...listed, description: `${glyph} ${listed.description}` }
   })
 
   on('command.run', { command: 'nebula' }, async $ => {
@@ -769,7 +762,9 @@ export const register: Register = on => {
           : { glyph: '✓', color: 'success', word: '' }
     const target = describe(tool, input)
     const isExpandable = !isRunning && output !== undefined && (isErrored || !ENGINE_RESULTS.has(tool))
-    const isOpen = isExpandable && (await $.state.get({ ...expanded, id: tool_use_id })).value === true
+    // A row the person never clicked follows the default: open for Bash while 'Open shell output' is on.
+    const opensAlone = tool === 'Bash' && (await isOn($, 'ShellOpen'))
+    const isOpen = isExpandable && ((await $.state.get({ ...expanded, id: tool_use_id })).value ?? opensAlone)
     // An opened row's frame names the length, so the row itself leaves it out.
     const brief = isErrored || isRunning || isOpen ? '' : summary(tool, output)
     const columns = e.viewport?.columns ?? 80
@@ -778,7 +773,7 @@ export const register: Register = on => {
     const room = columns - ROW_MARGIN - 2 - [...pillText].length - 1 - [...tail].length
     const shown = fit(target, room, PATHLIKE.has(tool))
     const onPress = () =>
-      isExpandable ? update($, { ...expanded, id: tool_use_id }, value => value !== true) : undefined
+      isExpandable ? update($, { ...expanded, id: tool_use_id }, value => !(value ?? opensAlone)) : undefined
 
     return (
       <Box flexDirection="column" marginTop={1}>
@@ -802,7 +797,8 @@ export const register: Register = on => {
       return next(e)
     }
     const { Box, Text, Button } = $.ui.resolve(e)
-    const isOpen = (await $.state.get({ ...expanded, id: tool_use_id })).value === true
+    const opensAlone = tool === 'Bash' && (await isOn($, 'ShellOpen'))
+    const isOpen = (await $.state.get({ ...expanded, id: tool_use_id })).value ?? opensAlone
     const files = isErrored ? [] : editedFiles(output)
     // The row says what ran and its line count, and opens on a click to the full output; the block
     // under it keeps only what the row can't say: an error, or the files the command changed.
@@ -818,7 +814,7 @@ export const register: Register = on => {
         <Button
           key={`result-${tool_use_id}`}
           plain
-          onPress={() => update($, { ...expanded, id: tool_use_id }, value => value !== true)}
+          onPress={() => update($, { ...expanded, id: tool_use_id }, value => !(value ?? opensAlone))}
         >
           <Text color={isErrored ? 'error' : 'inactive'}>{fit(label, room, false)}</Text>
         </Button>
@@ -837,7 +833,8 @@ export const register: Register = on => {
     const lastTarget = last === undefined ? '' : describe(last.tool, last.input)
     const label = calls.every(call => call.tool === 'Bash') ? 'Shell' : 'Explore'
     const group = `group:${e.requestId}`
-    const isOpen = !isActive && (await $.state.get({ ...expanded, id: group })).value === true
+    const opensAlone = label === 'Shell' && (await isOn($, 'ShellOpen'))
+    const isOpen = !isActive && ((await $.state.get({ ...expanded, id: group })).value ?? opensAlone)
 
     const pillText = ` ${isActive ? '' : `${isOpen ? '▾' : '▸'} `}${label} `
     const counts = ` ${tally(calls)}`
@@ -848,7 +845,7 @@ export const register: Register = on => {
 
     const header = (
       <Box marginTop={1}>
-        <Button key={group} plain onPress={() => update($, { ...expanded, id: group }, value => value !== true)}>
+        <Button key={group} plain onPress={() => update($, { ...expanded, id: group }, value => !(value ?? opensAlone))}>
           <Text color={isActive ? 'suggestion' : 'success'}>{isActive ? '◌' : '✓'}</Text>{' '}
           <Text inverse weight="bold" color="suggestion">
             {pillText}
