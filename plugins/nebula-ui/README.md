@@ -47,6 +47,10 @@ Colors follow your theme: the mod paints with theme keys (`permission` as its ac
 - A setext heading (text underlined with `---`) is read as a horizontal rule.
 - Quotes, callouts and command output are drawn as wrapped text with inline styles (code, bold, links), so a list or code fence inside one shows as written.
 
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md) for what each version added, changed and fixed.
+
 ## Developing
 
 `claude plugin validate plugins/nebula-ui` and `claude plugin test plugins/nebula-ui` check it; `claude --plugin-dir plugins/nebula-ui` loads it from this folder and reloads it as it changes.
