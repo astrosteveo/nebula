@@ -1,16 +1,32 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Dash, Disabled } from '../types'
-import { fitColumns, parse, rowWidth, spans, width, wrapSpans, wrapText } from './markdown'
-import type { Block, Callout, Span } from './markdown'
+import type { Dash, Disabled, FrameWidth, Proc } from '../types'
+import { fenceCommand, fitColumns, linkCommands, parse, rowWidth, spans, width, wrapSpans, wrapText } from './markdown'
+import type { Block, Callout, Command, Span } from './markdown'
 import { drawBand, gather } from './dashboard'
+import { PROCS_PANE, TONE, adopt, clearProc, drawProcs, isRunning, startProc, statusWord, stopAll, stopProc } from './procs'
 import { ACCENT } from './theme'
 
 const PANEL = 'nebula-ui'
 
 const disabled = atom({ plugin: 'nebula-ui', key: 'disabled' } as const, [] as Disabled)
 const dash = atom({ plugin: 'nebula-ui', key: 'dash' } as const, null as Dash | null)
+const procList = atom({ plugin: 'nebula-ui', key: 'procs' } as const, [] as Proc[])
+const pending = atom({ plugin: 'nebula-ui', key: 'pending' } as const, null as { command: string; origin: string | null } | null)
+const frameWidth = atom({ plugin: 'nebula-ui', key: 'frameWidth' } as const, 'fill' as FrameWidth)
+
+/** Lines of a run's output a code frame shows; /procs keeps more. */
+const RUN_LINES = 12
+
+/** The frame widths the panel steps through, in order. */
+const FRAME_WIDTHS: FrameWidth[] = ['fill', 'fit', 80, 100, 120]
+
+const isFrameWidth = (value: unknown): value is FrameWidth =>
+  value === 'fill' || value === 'fit' || (typeof value === 'number' && value >= 20)
+
+/** The dialog a click on a shell command opens: run it here, or copy it. */
+const RUN_PANE = 'nebula-run'
 
 const SITES = [
   { id: 'UserMessage', label: 'Prompt bar', about: 'your prompts behind an accent bar' },
@@ -25,6 +41,7 @@ const SITES = [
   { id: 'ToolProgress', label: 'Background hint', about: 'a compact ctrl+b hint' },
   { id: 'AbovePrompt', label: 'Dashboard band', about: 'model, branch, context, limits, cost above the prompt' },
   { id: 'CommandOutput', label: 'Command output', about: 'what a slash command printed, behind an accent bar' },
+  { id: 'ClickCommands', label: 'Clickable commands', about: 'click a command in a reply: / and ! to your prompt, shell to the clipboard' },
   { id: 'ShellOpen', label: 'Open shell output', about: 'Bash rows and Shell groups start open; a click still closes them' },
 ] as const
 
@@ -33,6 +50,15 @@ type Site = (typeof SITES)[number]['id']
 /** The panel's keys, one per part, in order. */
 const HOTKEYS = '1234567890abcdefghij'
 const isOn = async ($: EngineInterface, site: Site) => !(await read($, disabled)).includes(site)
+
+const stepFrameWidth = async ($: EngineInterface) => {
+  const width = await update($, frameWidth, now => {
+    const at = FRAME_WIDTHS.indexOf(now)
+
+    return FRAME_WIDTHS[(at + 1) % FRAME_WIDTHS.length]!
+  })
+  await $.store.set('frameWidth', width)
+}
 
 const toggle = async ($: EngineInterface, site: Site) => {
   const list = await update($, disabled, off =>
@@ -312,7 +338,7 @@ const summary = (tool: string, output: unknown) => {
 }
 
 /** Drawing pieces shared by replies and tool rows, sized to `columns`. */
-const kit = ({ Box, Text, Code }: Ui, columns: number) => {
+const kit = ({ Box, Text, Code }: Ui, columns: number, frameSize: FrameWidth = 'fill') => {
   const line = (glyph: string, color: string) => (
     <Box height={1} overflow="hidden">
       <Text color={color}>{glyph.repeat(columns)}</Text>
@@ -373,14 +399,26 @@ const kit = ({ Box, Text, Code }: Ui, columns: number) => {
   // view (absolutely placed sides were drawn whole from the viewport's edge, spilling past the frame).
   // Its label and note are laid over the top border: column-reverse puts the overlay above the Box, its
   // -1 margin pulls it onto the border row, and as the later child it is painted last.
-  const frame = (body: RenderChildren, label?: string, note?: string) => (
-    <Box flexDirection="column-reverse">
+  // `fill` stretches as a column child does, `fit` shrinks to the wider of the content and the top border's
+  // words, and a number of columns is held to what the row has room for.
+  const sized =
+    frameSize === 'fill'
+      ? {}
+      : frameSize === 'fit'
+        ? { alignSelf: 'flex-start' as const }
+        : { width: Math.min(frameSize, columns) }
+
+  const frame = (body: RenderChildren, label?: string, note?: string, action?: RenderChildren) => (
+    <Box flexDirection="column-reverse" {...sized}>
       <Box flexDirection="column" borderStyle="round" borderColor="inactive" paddingX={1}>
         {body}
       </Box>
       <Box flexDirection="row" justifyContent="space-between" marginX={2} marginBottom={-1} height={1} overflow="hidden">
         <Text color={ACCENT}>{label === undefined ? '' : ` ${label} `}</Text>
-        <Text color="inactive">{note === undefined ? '' : ` ${note} `}</Text>
+        <Box flexDirection="row">
+          <Text color="inactive">{note === undefined ? '' : ` ${note} `}</Text>
+          {action}
+        </Box>
       </Box>
     </Box>
   )
@@ -454,9 +492,9 @@ const kit = ({ Box, Text, Code }: Ui, columns: number) => {
 }
 
 /** What an opened tool row shows: the output a model read, framed and highlighted. */
-const detail = (ui: Ui, columns: number, tool: string, output: unknown, isErrored: boolean) => {
+const detail = (ui: Ui, columns: number, tool: string, output: unknown, isErrored: boolean, frameSize: FrameWidth) => {
   const { Box, Text, Markdown } = ui
-  const { frame, code } = kit(ui, columns - 2)
+  const { frame, code } = kit(ui, columns - 2, frameSize)
 
   if (typeof output === 'string') {
     const shown = clip(output)
@@ -570,8 +608,17 @@ export const register: Register = on => {
       name: 'nebula',
       description: 'Open the Nebula UI panel to switch each restyled part on or off',
     })
+    const savedWidth = await $.store.get('frameWidth')
+    if (isFrameWidth(savedWidth)) {
+      await update($, frameWidth, () => savedWidth)
+    }
+    await $.command.register({ name: 'procs', description: 'Show the commands started from replies, with their output and a stop button' })
     void gather($)
-    $.clock.every(15_000, () => void gather($))
+    void adopt($)
+    $.clock.every(15_000, () => {
+      void gather($)
+      void adopt($)
+    })
     // The engine keeps each command's listing for the session; listing them again drops the glyphs an
     // earlier version of nebula-ui gave them, which also reached the model's list of skills.
     void $.ui.invalidate('command.describe')
@@ -598,8 +645,100 @@ export const register: Register = on => {
       return next(e)
     }
     const figures = await read($, dash)
+    const running = (await read($, procList)).filter(isRunning).length
+    const { Button, Text } = $.ui.resolve(e)
+    const chip =
+      running === 0 ? undefined : (
+        <Button key="procs" plain onPress={() => void $.ui.open({ id: PROCS_PANE, title: 'Processes' })}>
+          <Text color="suggestion">⚙ {running} running</Text>
+        </Button>
+      )
 
-    return figures === null ? next(e) : drawBand($.ui.resolve(e), figures)
+    return figures === null ? next(e) : drawBand($.ui.resolve(e), figures, chip)
+  })
+
+  on('session.end', async ($, e, next) => {
+    // A process started from a reply ends with the session, its children too.
+    await stopAll($)
+
+    return next(e)
+  })
+
+  on('command.run', { command: 'procs' }, async $ => {
+    await $.ui.open({ id: PROCS_PANE, title: 'Processes' })
+
+    return { text: 'Processes pane opened.' }
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PROCS_PANE }, async ($, e) => {
+    if (e.surface !== 'terminal') {
+      const { Text } = $.ui.resolve(e)
+
+      return <Text dimColor>The Processes pane draws in the terminal.</Text>
+    }
+    const list = await read($, procList)
+    const now = (await read($, dash))?.now ?? (await $.clock.now())
+
+    return drawProcs($.ui.resolve(e), list, now, e.props.bodyColumns, {
+      stop: id => void stopProc($, id),
+      clear: id => void clearProc($, id),
+      clearEnded: () => void update($, procList, all => all.filter(isRunning)),
+    })
+  })
+
+  on('ui.render', { component: 'Pane', requestId: RUN_PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const asked = await read($, pending)
+    const cwd = await $.session.cwd()
+    if (asked === null) {
+      return <Text dimColor>No command to run.</Text>
+    }
+    const close = async () => {
+      await update($, pending, () => null)
+      await $.ui.close({ id: RUN_PANE })
+    }
+
+    return (
+      <Box flexDirection="column" rowGap={1}>
+        <Box flexDirection="column">
+          <Text dimColor>Run in {cwd}:</Text>
+          <Text weight="bold" color={ACCENT}>
+            $ {asked.command}
+          </Text>
+        </Box>
+        <Box flexDirection="row" gap={2}>
+          <Button
+            key="run"
+            label="▶ run here"
+            hotkey="r"
+            variant="primary"
+            autoFocus
+            onPress={async () => {
+              const chosen = await read($, pending)
+              await close()
+              if (chosen !== null) {
+                await startProc($, chosen.command, chosen.origin)
+                await $.ui.open({ id: PROCS_PANE, title: 'Processes' })
+              }
+            }}
+          />
+          <Button
+            key="copy"
+            label="⧉ copy"
+            hotkey="c"
+            onPress={async () => {
+              const chosen = await read($, pending)
+              await close()
+              if (chosen !== null) {
+                const copied = await $.ui.copy({ text: chosen.command, surface: e.surface })
+                $.ui.toast(copied.isCopied ? `Copied ${chosen.command}` : 'Could not copy')
+              }
+            }}
+          />
+          <Button key="cancel" label="cancel" hotkey="x" role="dismiss" onPress={close} />
+        </Box>
+      </Box>
+    )
   })
 
   on('command.run', { command: 'nebula' }, async $ => {
@@ -611,6 +750,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANEL }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const off = await read($, disabled)
+    const width = await read($, frameWidth)
 
     return (
       <Box flexDirection="column">
@@ -629,6 +769,12 @@ export const register: Register = on => {
               </Button>
             )
           })}
+        </Box>
+        <Box marginTop={1}>
+          <Button key="frame-width" plain hotkey="w" onPress={() => stepFrameWidth($)}>
+            <Text color={ACCENT}>▭</Text> Frame width <Text weight="bold">{String(width)}</Text>{' '}
+            <Text dimColor>code and output frames: fill, fit to their content, or a width in columns (w to change)</Text>
+          </Button>
         </Box>
       </Box>
     )
@@ -679,20 +825,116 @@ export const register: Register = on => {
     if (e.surface !== 'terminal' || e.props.isSummary === true || !(await isOn($, 'AssistantMessage'))) {
       return next(e)
     }
-    const { Box, Text, Markdown } = $.ui.resolve(e)
-    const { line, barred, frame, code, inline, table } = kit($.ui.resolve(e), e.viewport?.columns ?? 80)
+    const { Box, Text, Markdown, Button } = $.ui.resolve(e)
+    const { line, barred, frame, code, inline, table } = kit($.ui.resolve(e), (e.viewport?.columns ?? 80) - 3, await read($, frameWidth))
+    const isClickable = await isOn($, 'ClickCommands')
+    const started = isClickable ? await read($, procList) : []
+    // The time a run's status counts from: the dashboard's, refreshed with it (no clock call per redraw).
+    const now = (await read($, dash))?.now ?? 0
+    /** The latest process a code frame of this reply started, if any. */
+    const procOf = (index: number) => started.find(proc => proc.origin === `${e.requestId}:${index}`)
+
+    const copy = async (text: string) => {
+      const copied = await $.ui.copy({ text, surface: e.surface })
+      const lines = text.split('\n').length
+      $.ui.toast(copied.isCopied ? `Copied ${lines > 1 ? plural(lines, 'line') : fit(text, 60, false)}` : 'Could not copy')
+    }
+
+    // A slash or ! command goes to the prompt box for the person's Enter (copied while they have a draft);
+    // a shell command opens a dialog that runs it here, tracked in the Processes pane, or copies it.
+    const use = async (command: Command | undefined) => {
+      if (command === undefined) {
+        return
+      }
+      if (command.kind === 'shell') {
+        await update($, pending, () => ({ command: command.text, origin: null }))
+        await $.ui.open({ id: RUN_PANE, title: 'Run a command', focus: true, closeOnEscape: true })
+
+        return
+      }
+      const draft = (await $.prompt.read()).text
+      if (draft.trim() !== '') {
+        return copy(command.text)
+      }
+      const { isFilled } = await $.prompt.fill({ text: command.text, mode: 'replace' })
+      $.ui.toast(isFilled ? `${fit(command.text, 60, false)} is in your prompt: Enter runs it` : 'Could not reach the prompt')
+    }
     // What a block may take beside the reply's two-column gutter, one column spare.
     const room = (e.viewport?.columns ?? 80) - 3
 
-    const draw = (block: Block) => {
+    // A fence copies; one that holds commands also runs (shell, through the run dialog) or goes to the prompt.
+    const fenceActions = (block: Extract<Block, { kind: 'code' }>, index: number) => {
+      const command = fenceCommand(block.language, block.source)
+      const proc = procOf(index)
+      // The fence's button is a deliberate run: it starts the command here, its output drawn in the frame.
+      const run = () =>
+        command?.kind === 'shell' ? void startProc($, command.text, `${e.requestId}:${index}`) : void use(command ?? undefined)
+
+      return [
+        command === null ? null : proc !== undefined && isRunning(proc) ? (
+          <Button key={`stop-${index}`} plain onPress={() => void stopProc($, proc.id)}>
+            <Text color="error"> ■ stop </Text>
+          </Button>
+        ) : (
+          <Button key={`run-${index}`} plain onPress={run}>
+            <Text color="success"> {command.kind === 'shell' ? '▶ run' : '↵ prompt'} </Text>
+          </Button>
+        ),
+        <Button key={`copy-${index}`} plain onPress={() => void copy(block.source)}>
+          <Text color={ACCENT}> ⧉ copy </Text>
+        </Button>,
+      ]
+    }
+
+    // The code, and under it what a run of it printed: its status, then its last lines.
+    const ranIn = (block: Extract<Block, { kind: 'code' }>, index: number) => {
+      const source = code(block.source, block.language === '' ? {} : { language: block.language })
+      const proc = procOf(index)
+      if (proc === undefined) {
+        return source
+      }
+      const tone = TONE[proc.status]
+      const lines = proc.tail.map(printable)
+      while (lines.length > 0 && lines[lines.length - 1]!.trim() === '') {
+        lines.pop()
+      }
+
+      return (
+        <Box flexDirection="column">
+          {source}
+          <Box marginTop={1}>{line('┄', 'inactive')}</Box>
+          <Text color={tone.color}>
+            {tone.glyph} {statusWord(proc, now)}
+          </Text>
+          {lines.slice(-RUN_LINES).map(one => (
+            <Text wrap="truncate-end">{one}</Text>
+          ))}
+        </Box>
+      )
+    }
+
+    const draw = (block: Block, index: number) => {
       switch (block.kind) {
-        case 'prose':
-          return <Markdown text={block.text} />
+        case 'prose': {
+          const { text, commands } = isClickable ? linkCommands(block.text) : { text: block.text, commands: new Map() }
+
+          return commands.size === 0 ? (
+            <Markdown text={block.text} />
+          ) : (
+            <Markdown
+              key={`commands-${index}`}
+              text={text}
+              pressableLinks={[...commands.keys()]}
+              onLinkPress={link => void use(commands.get(link.href))}
+            />
+          )
+        }
         case 'code':
           return frame(
-            code(block.source, block.language === '' ? {} : { language: block.language }),
+            ranIn(block, index),
             block.language === '' ? undefined : block.language,
             block.source.split('\n').length >= LINE_COUNT_FROM ? lineCount(block.source) : undefined,
+            isClickable ? fenceActions(block, index) : undefined,
           )
         case 'table':
           return table(block)
@@ -740,7 +982,7 @@ export const register: Register = on => {
           <Text>{e.props.isFirstOfReply ? '●' : ' '}</Text>
         </Box>
         <Box flexDirection="column" flexGrow={1} flexShrink={1} rowGap={1}>
-          {parse(e.props.text).map(draw)}
+          {parse(e.props.text).map((block, index) => draw(block, index))}
         </Box>
       </Box>
     )
@@ -786,7 +1028,11 @@ export const register: Register = on => {
           {brief !== '' && <Text dimColor> {brief}</Text>}
           {status.word !== '' && <Text color={status.color}> {status.word}</Text>}
         </Button>
-        {isOpen && <Box paddingLeft={2}>{detail(ui, e.viewport?.columns ?? 80, tool, output, isErrored)}</Box>}
+        {isOpen && (
+          <Box paddingLeft={2}>
+            {detail(ui, e.viewport?.columns ?? 80, tool, output, isErrored, await read($, frameWidth))}
+          </Box>
+        )}
       </Box>
     )
   })

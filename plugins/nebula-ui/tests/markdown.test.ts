@@ -1,6 +1,6 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
-import { fitColumns, parse, width, wrapSpans, wrapText } from '../hooks/markdown'
+import { commandOf, fenceCommand, fitColumns, linkCommands, parse, width, wrapSpans, wrapText } from '../hooks/markdown'
 
 const REPLY = [
   '# Plan',
@@ -154,4 +154,70 @@ test('a prompt and a quote are drawn as rows of text, one bar glyph each, nothin
   expect(rows.length).toBeGreaterThanOrEqual(5)
   expect(rows.every(row => [...row.text].length <= 40)).toBe(true)
   expect(boxes.some(box => box.props.position === 'absolute')).toBe(false)
+})
+
+test('inline code reads as a command only when it would run something', async () => {
+  expect(commandOf('/reload-plugins')).toEqual({ kind: 'slash', text: '/reload-plugins' })
+  expect(commandOf('/plugin install nebula-ui@nebula')).toMatchObject({ kind: 'slash' })
+  expect(commandOf('! gcloud auth login')).toEqual({ kind: 'bang', text: '!gcloud auth login' })
+  expect(commandOf('claude --plugin-dir plugins/nebula-ui')).toMatchObject({ kind: 'shell' })
+  expect(commandOf('/home/astrosteveo/Projects')).toBeNull()
+  expect(commandOf('plugins/nebula-ui')).toBeNull()
+  expect(commandOf('git')).toBeNull()
+  expect(commandOf('0.1.6')).toBeNull()
+  expect(commandOf('sleep 30 && echo done')).toMatchObject({ kind: 'shell' })
+  expect(commandOf('mytool --watch src')).toMatchObject({ kind: 'shell' })
+  expect(commandOf('ship it')).toBeNull()
+  expect(commandOf('fit(text, 60, false)')).toBeNull()
+  expect(commandOf('Run the tests')).toBeNull()
+})
+
+test('prose links its commands and leaves other code, and code in links, as written', async () => {
+  const { text, commands } = linkCommands('Run `/reload-plugins`, then `git status` in `plugins/nebula-ui` or [`/x`](https://a.b).')
+
+  expect(text).toBe(
+    'Run [`/reload-plugins`](https://nebula-ui.invalid/command/0), then [`git status`](https://nebula-ui.invalid/command/1) in `plugins/nebula-ui` or [`/x`](https://a.b).',
+  )
+  expect([...commands.values()].map(command => command.kind)).toEqual(['slash', 'shell'])
+})
+
+test('the frame width setting fills, fits or holds code frames to a width', async ($, on) => {
+  mock.store(on)
+  const panel = await $.ui.mount({
+    plugin: 'nebula-ui',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'nebula-ui',
+    props: { title: 'Nebula UI', isFocused: true, bodyColumns: 80, placement: 'inline', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  })
+  const frameOf = async () => {
+    const reply = await $.ui.mount({
+      plugin: 'nebula-ui',
+      surface: 'terminal',
+      component: 'AssistantMessage',
+      props: { text: '```ts\nconst a = 1\n```', isFirstOfReply: false },
+      viewport: { columns: 120, rows: 40 },
+    })
+
+    return (await reply.findAll({ type: 'Box' })).find(box => box.props.flexDirection === 'column-reverse')?.props
+  }
+
+  expect(await frameOf()).not.toHaveProperty('width')
+  expect((await panel.find({ key: 'frame-width' }))?.text).toContain('Frame width fill')
+
+  await panel.press({ key: 'frame-width' })
+  expect(await frameOf()).toMatchObject({ alignSelf: 'flex-start' })
+
+  await panel.press({ key: 'frame-width' })
+  expect(await frameOf()).toMatchObject({ width: 80 })
+  expect((await panel.find({ key: 'frame-width' }))?.text).toContain('Frame width 80')
+})
+
+test('a fence runs when it holds commands, as one script, and a lone slash command goes to the prompt', async () => {
+  expect(fenceCommand('sh', 'python3 -m http.server 8765')).toEqual({ kind: 'shell', text: 'python3 -m http.server 8765' })
+  expect(fenceCommand('console', '$ npm install\n# then\n$ npm run dev')).toEqual({ kind: 'shell', text: 'npm install\nnpm run dev' })
+  expect(fenceCommand('', 'git fetch\ngit rebase origin/main')).toMatchObject({ kind: 'shell' })
+  expect(fenceCommand('', '/plugin install nebula-ui@nebula')).toEqual({ kind: 'slash', text: '/plugin install nebula-ui@nebula' })
+  expect(fenceCommand('ts', 'const a = 1')).toBeNull()
+  expect(fenceCommand('', 'some plain notes')).toBeNull()
 })

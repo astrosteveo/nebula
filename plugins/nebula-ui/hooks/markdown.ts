@@ -308,3 +308,93 @@ export const wrapText = (text: string, room: number, isPlain = false): Span[][] 
 
 /** Columns a row of runs takes. */
 export const rowWidth = (row: Span[]) => row.reduce((sum, run) => sum + columnsOf(run.text), 0)
+
+/** A command a reply names in inline code: a slash command or `! shell` for this session, or a shell command. */
+export type Command = { kind: 'slash' | 'bang' | 'shell'; text: string }
+
+/** First words that make inline code a shell command worth copying (a path or a name is left alone). */
+const SHELL_WORDS = new Set(
+  (
+    'claude git gh npm npx pnpm yarn bun bunx deno node python python3 pip pip3 uv uvx cargo rustup go make cmake ' +
+    'docker podman kubectl brew apt sudo curl wget ssh scp rsync ls cd cat rg fd grep sed awk tsc eza bat code ' +
+    'just mise nvm export source chmod mkdir rm cp mv touch echo tar unzip systemctl journalctl pacman yay paru ' +
+    'sleep watch tail head find env time timeout xargs which kill pkill ps top htop du df less man ping jq yq ' +
+    'sqlite3 psql mysql redis-cli ruby gem bundle rails php composer java mvn gradle dotnet swift zig nix ' +
+    'terraform aws gcloud az firebase vercel netlify flyctl vite pytest jest vitest eslint prettier ruff black ' +
+    'mypy poetry pipx conda tmux zsh bash sh fish nvim vim nano http nc dig open xdg-open godot gdh'
+  ).split(' '),
+)
+
+/** A flag or a piece of shell syntax, which make code read as a command whatever its first word. */
+const SHELL_SHAPE = /(?:^|\s)--?[a-z0-9]|&&|\|\||[|;>]|\$[A-Za-z_{(]/i
+
+/** A program's name: lowercase, as typed at a prompt (not `Name`, `fn(x)` or `a.b.c`). */
+const PROGRAM = /^[a-z][a-z0-9_+-]*$/
+
+/** What a piece of inline code would run, or null when it reads as a name, a path or a value. */
+export const commandOf = (code: string): Command | null => {
+  const text = code.trim()
+  if (/^\/[a-z][\w:-]*(?:\s|$)/i.test(text)) {
+    return { kind: 'slash', text }
+  }
+  if (/^!\s*\S/.test(text)) {
+    return { kind: 'bang', text: `!${text.slice(1).trimStart()}` }
+  }
+  const first = text.split(/\s+/)[0] ?? ''
+
+  const isCommand = /\s/.test(text) && (SHELL_WORDS.has(first) || (PROGRAM.test(first) && SHELL_SHAPE.test(text)))
+
+  return isCommand ? { kind: 'shell', text } : null
+}
+
+/** Where a command's link points: a host that never resolves, so nothing opens if a click reaches the terminal. */
+const COMMAND_HOST = 'https://nebula-ui.invalid/command/'
+
+/**
+ * Prose with each command in inline code made a link the mod answers, and the commands by their link.
+ * Code already inside a link's text is left as written.
+ */
+export const linkCommands = (prose: string) => {
+  const commands = new Map<string, Command>()
+  const text = prose.replace(/(\[?)`([^`\n]+)`/g, (whole, bracket: string, code: string) => {
+    const command = bracket === '' ? commandOf(code) : null
+    if (command === null) {
+      return whole
+    }
+    const href = `${COMMAND_HOST}${commands.size}`
+    commands.set(href, command)
+
+    return `[\`${code}\`](${href})`
+  })
+
+  return { text, commands }
+}
+
+/** Fence languages that hold shell commands. */
+const SHELL_FENCES = new Set(['sh', 'bash', 'shell', 'zsh', 'console', 'terminal', 'fish'])
+
+/**
+ * What a code fence would run, or null. A shell fence is one script (prompts `$ ` and comment lines dropped);
+ * a fence without a language counts when every line reads as a command; one `/` or `!` line goes to the prompt.
+ */
+export const fenceCommand = (language: string, source: string): Command | null => {
+  const lines = source
+    .split('\n')
+    .map(line => line.replace(/^\s*\$\s+/, ''))
+    .filter(line => line.trim() !== '' && !line.trim().startsWith('#'))
+  if (lines.length === 0) {
+    return null
+  }
+  const single = lines.length === 1 ? commandOf(lines[0]!) : null
+  if (single !== null && single.kind !== 'shell') {
+    return single
+  }
+  if (SHELL_FENCES.has(language)) {
+    return { kind: 'shell', text: lines.join('\n') }
+  }
+  if (language === '' && lines.every(line => commandOf(line)?.kind === 'shell')) {
+    return { kind: 'shell', text: lines.join('\n') }
+  }
+
+  return null
+}

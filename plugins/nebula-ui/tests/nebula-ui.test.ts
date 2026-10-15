@@ -306,3 +306,49 @@ test('a tool error printed in color draws as plain text', async $ => {
   expect(drawn).toContain('[bat error]: missing.md: No such file')
   expect(drawn).not.toMatch(/[\u0000-\u0008\u000b-\u001f]/)
 })
+
+test('a click on a slash command in a reply fills the prompt; a shell command asks to run or copy', async ($, on) => {
+  let filled = ''
+  let copied = ''
+  const opened: string[] = []
+  on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', ($, e) => {
+    filled = e.text
+
+    return { isFilled: true }
+  })
+  on('ui.copy', ($, e) => {
+    copied = e.text
+
+    return { value: { isCopied: true } }
+  })
+  on('ui.open', ($, e) => {
+    opened.push(e.id)
+
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/repo' }))
+  const reply = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    props: { text: 'Run `/reload-plugins`, or `npm run dev` to serve it.', isFirstOfReply: true },
+  })
+  const prose = await reply.find({ type: 'Markdown' })
+  expect(prose?.props.pressableLinks).toEqual(['https://nebula-ui.invalid/command/0', 'https://nebula-ui.invalid/command/1'])
+
+  await reply.press({ key: 'commands-0', link: { href: 'https://nebula-ui.invalid/command/0' } })
+  expect(filled).toBe('/reload-plugins')
+
+  await reply.press({ key: 'commands-0', link: { href: 'https://nebula-ui.invalid/command/1' } })
+  expect(opened).toEqual(['nebula-run'])
+  expect(copied).toBe('')
+
+  const dialog = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'nebula-run', props: panel })
+  expect(await dialog.find({ type: 'Text', text: /\$ npm run dev/ })).toBeDefined()
+
+  await dialog.press({ key: 'copy' })
+  expect(copied).toBe('npm run dev')
+})

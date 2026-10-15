@@ -1,5 +1,5 @@
 import { atom, update } from 'claude-code'
-import type { Elements, EngineInterface } from 'claude-code'
+import type { Elements, EngineInterface, RenderElement } from 'claude-code'
 
 import type { Dash } from '../types'
 import { ACCENT, tone } from './theme'
@@ -91,7 +91,7 @@ const gauge = (percent: number, cells: number) => {
 }
 
 /** One row of figures, separated by dim bars; wraps to a second row where the band is narrow. */
-export const drawBand = ({ Box, Text }: Elements['terminal'], d: Dash) => {
+export const drawBand = ({ Box, Text }: Elements['terminal'], d: Dash, extra?: RenderElement) => {
   const items = [
     <Text>
       <Text color={ACCENT}>✦ </Text>
@@ -142,6 +142,10 @@ export const drawBand = ({ Box, Text }: Elements['terminal'], d: Dash) => {
   }
 
   items.push(<Text dimColor>⏱ {span(d.now - d.startedAt)}</Text>)
+
+  if (extra !== undefined) {
+    items.push(extra)
+  }
 
   return (
     <Box flexDirection="row" flexWrap="wrap" columnGap={1}>

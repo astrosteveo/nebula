@@ -16,6 +16,8 @@ A modern restyle of Claude Code's terminal UI, built only on the mods API. Every
 | Prompt bar | Your prompts sit behind a thin accent bar instead of a grey box |
 | Rich markdown | Code fences in a frame with the language and line count on the top edge, highlighted; `diff` fences in diff colors; tables redrawn with a rounded frame, an accent header, alignment and inline styles; headings with glyphs; `> [!NOTE]`-style callouts; blockquotes and rules |
 | Tool rows | `✓  ▸ Bash  npm test  12 lines`: a status glyph, the tool as a pill, its target trimmed to fit, and a summary (lines of output, files found, search results, an HTTP status). Click anywhere on the row to open what the tool returned: Bash output and a diff of each file the command changed, highlighted file contents for Read, the page for WebFetch, errors, or JSON. Under the row, only an error or the files changed stay, and a click there opens the row too |
+| Clickable commands | In a reply, a command in inline code is a link. A click puts `/command` or `! command` in your prompt for your Enter (copied instead if you're typing); a shell command opens a dialog to **run it here** or copy it. Every code frame has `⧉ copy` on its top border, and a frame that holds commands (a `sh`/`bash`/`console` fence, or one whose lines all read as commands) also has `▶ run`, or `↵ prompt` for a lone `/` command. `▶ run` starts the block at once and draws its output in the same frame, under the code, with `■ stop` on the border while it runs. Clicks reach the mod in fullscreen |
+| Processes | `/procs` lists every command you ran from a reply: status, runtime, its last lines of output, and `■ stop`, which stops its whole process group (it's started with `setsid`). The dashboard band shows `⚙ N running` while any are. They stop when the session ends; after `/reload-plugins` one still running is marked detached, its output no longer read, and can still be stopped |
 | Open shell output | Bash rows and `Shell` groups start open on what they printed; a click closes one, and switching this off in `/nebula` starts them closed |
 | Explore groups | Folded reads and searches as one line (`Shell` when they're all commands); click to unfold into tool rows |
 | Spinner | Two pills, what the turn is doing (`✦ thinking`, `✎ writing`, `⚙ running tools`) and its word (`Kneading…`) in Claude's color, before the engine's animated glyph, time and tokens |
@@ -26,6 +28,8 @@ A modern restyle of Claude Code's terminal UI, built only on the mods API. Every
 | Background hint | A shorter `⇣ ctrl+b to run in background` |
 | Command output | What a slash command printed, behind an accent bar (red with `✗ failed` for an error) instead of a dim `⎿` line |
 | Dashboard band | Model, git branch and changes, context gauge, rate-limit windows with reset times, cost and session age, above the prompt |
+
+**Frame width** (in `/nebula`, key `w`): code and output frames fill the width (the default), fit their content, or hold to 80, 100 or 120 columns.
 
 Colors follow your theme: the mod paints with theme keys (`permission` as its accent), not fixed colors.
 
