@@ -2,7 +2,23 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Dash, Disabled, FrameWidth, Proc } from '../types'
-import { fenceCommand, fitColumns, linkCommands, parse, rowWidth, spans, width, wrapSpans, wrapText } from './markdown'
+import {
+  cellWidth,
+  colorRuns,
+  fenceCommand,
+  fitColumns,
+  lastCells,
+  linkCommands,
+  parse,
+  printable,
+  printableColored,
+  rowWidth,
+  spans,
+  takeCells,
+  width,
+  wrapSpans,
+  wrapText,
+} from './markdown'
 import type { Block, Callout, Command, Span } from './markdown'
 import { drawBand, gather } from './dashboard'
 import {
@@ -60,7 +76,7 @@ const SITES = [
   { id: 'ToolProgress', label: 'Background hint', about: 'a compact ctrl+b hint' },
   { id: 'AbovePrompt', label: 'Dashboard band', about: 'model, branch, context, limits, cost above the prompt' },
   { id: 'CommandOutput', label: 'Command output', about: 'what a slash command printed, behind an accent bar' },
-  { id: 'ClickCommands', label: 'Clickable commands', about: 'click a command in a reply: / and ! to your prompt, shell to the clipboard' },
+  { id: 'ClickCommands', label: 'Clickable commands', about: 'click a command in a reply: / and ! go to your prompt, a shell command opens a run dialog' },
   { id: 'ShellOpen', label: 'Open shell output', about: 'Bash rows and Shell groups start open; a click still closes them' },
 ] as const
 
@@ -117,6 +133,9 @@ const SPINNER_MODES = {
   'tool-use': { glyph: '⚙', label: 'running tools', color: 'suggestion' },
 } as const
 
+/** Whether a plain object has its own entry under `key`: a tool named `constructor` has none. */
+const own = (record: object, key: string) => Object.prototype.hasOwnProperty.call(record, key)
+
 const NOUNS: Record<string, [string, string]> = {
   Read: ['read', 'reads'],
   Grep: ['search', 'searches'],
@@ -144,13 +163,6 @@ const TARGETS: Record<string, string> = {
 
 const PATHLIKE = new Set(['Read', 'Edit', 'Write', 'NotebookEdit', 'WebFetch'])
 
-/** Terminal color and cursor codes (`ESC[31m`) a tool printed: drawn text admits no control characters but tab and newline. */
-const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g
-
-/** Text from a tool, safe to draw: color codes gone, other control characters but tab and newline dropped. */
-const printable = (text: string) =>
-  text.replace(ANSI, '').replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
-
 const oneLine = (text: string) => printable(text).split('\n')[0]!.replace(/\s+/g, ' ').trim()
 
 /** What the call acts on, in one line: Bash's command, Read's path, a search's pattern. */
@@ -160,13 +172,20 @@ const PREAMBLE = /^(?:cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*|[A-Za-z_][A-Za-
 /** A shell command without its preamble, or as written when the preamble is all there is. */
 const withoutPreamble = (command: string) => command.replace(PREAMBLE, '') || command
 
+/** The process tool's name as a model calls it, whose row names the command it starts. */
+const PROCESS_TOOL = 'mcp__nebula-ui__process_control'
+
 const describe = (tool: string, input: unknown): string => {
   if (typeof input !== 'object' || input === null) {
     return ''
   }
   const fields = input as Record<string, unknown>
-  const named = TARGETS[tool]
-  const value = named === undefined ? Object.values(fields).find(one => typeof one === 'string') : fields[named]
+  const named = tool === PROCESS_TOOL ? 'command' : own(TARGETS, tool) ? TARGETS[tool] : undefined
+  let value = named === undefined ? Object.values(fields).find(one => typeof one === 'string') : fields[named]
+  // A stop or restart names no command: its row names the process.
+  if (tool === PROCESS_TOOL && typeof value !== 'string') {
+    value = fields.id
+  }
 
   if (typeof value !== 'string') {
     return ''
@@ -185,7 +204,7 @@ const toolName = (tool: string) => {
 const tally = (calls: ReadonlyArray<{ tool: string }>) => {
   const counts = new Map<string, { n: number; nouns: [string, string] }>()
   for (const call of calls) {
-    const nouns = NOUNS[call.tool] ?? [`${call.tool} call`, `${call.tool} calls`]
+    const nouns: [string, string] = own(NOUNS, call.tool) ? NOUNS[call.tool]! : [`${call.tool} call`, `${call.tool} calls`]
     const key = nouns[0]
     const seen = counts.get(key)
     counts.set(key, { n: (seen?.n ?? 0) + 1, nouns })
@@ -195,7 +214,8 @@ const tally = (calls: ReadonlyArray<{ tool: string }>) => {
 }
 
 const duration = (ms: number) => {
-  const total = Math.max(0, Math.round(ms / 1000))
+  // A duration the engine did not measure reads as none, not as NaN.
+  const total = Number.isFinite(ms) ? Math.max(0, Math.round(ms / 1000)) : 0
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
   const seconds = total % 60
@@ -242,6 +262,9 @@ const ENGINE_RESULTS = new Set([
 /** Lines an opened tool row shows before it says how many more there are. */
 const DETAIL_LINES = 40
 
+/** The most lines an opened row shows once its "show all" control is on. */
+const MAX_LINES = 2000
+
 type Ui = Elements['terminal']
 
 const plural = (n: number, word: string) => `${n} ${n === 1 ? word : `${word}s`}`
@@ -251,13 +274,14 @@ const LINE_COUNT_FROM = 5
 
 const lineCount = (source: string) => plural(source === '' ? 0 : source.split('\n').length, 'line')
 
-/** The first `DETAIL_LINES` lines of `text`, and a note naming how many were left out. */
-const clip = (text: string) => {
-  const lines = printable(text).replace(/\n+$/, '').split('\n')
-  const hidden = lines.length - DETAIL_LINES
+/** The first `limit` lines of `text`, and a note naming how many were left out. `colored` keeps color codes for `colorRuns`. */
+const clip = (text: string, limit = DETAIL_LINES, colored = false) => {
+  const lines = (colored ? printableColored(text) : printable(text)).replace(/\n+$/, '').split('\n')
+  const hidden = lines.length - limit
 
   return {
-    text: lines.slice(0, DETAIL_LINES).join('\n'),
+    text: lines.slice(0, limit).join('\n'),
+    hidden: Math.max(0, hidden),
     note: hidden > 0 ? `${plural(hidden, 'more line')}` : lineCount(lines.join('\n')),
   }
 }
@@ -288,7 +312,7 @@ const editedFiles = (output: unknown): EditedFile[] => {
 
       return [
         `@@ -${at('oldStart')},${at('oldLines')} +${at('newStart')},${at('newLines')} @@`,
-        ...(Array.isArray(body) ? body.map(String) : []),
+        ...(Array.isArray(body) ? body.map(line => printable(String(line))) : []),
       ]
     })
     const body = lines.filter(line => !line.startsWith('@@'))
@@ -467,11 +491,36 @@ const kit = ({ Box, Text, Code }: Ui, columns: number, frameSize: FrameWidth = '
     </Box>
   )
 
+  // A blank line is drawn as a space: the engine's code element drops an empty line, and the frame would lose it.
   const code = (source: string, options: { language?: string; path?: string; startLine?: number }) => (
-    <Code source={source} {...options} format={options.language === 'diff' ? 'diff' : 'source'} />
+    <Code
+      source={source
+        .split('\n')
+        .map(line => (line === '' ? ' ' : line))
+        .join('\n')}
+      {...options}
+      format={options.language === 'diff' ? 'diff' : 'source'}
+    />
   )
 
   const inline = (line: string) => spans(line).map(styled)
+
+  // A table too wide for the reply is drawn as each row's cells, one under another, with their headers.
+  const stacked = (block: Extract<Block, { kind: 'table' }>) => (
+    <Box flexDirection="column" rowGap={1}>
+      {block.rows.map(values => (
+        <Box flexDirection="column">
+          {block.header.map((head, column) => {
+            const value = values[column] ?? ''
+
+            return value === ''
+              ? null
+              : wrapText(`${head}: ${value}`, columns - 4).map(row => <Text>{row.map(styled)}</Text>)
+          })}
+        </Box>
+      ))}
+    </Box>
+  )
 
   // A table is drawn as lines of text: every cell wrapped to its column, each row as tall as its tallest
   // cell, the dividers written into each line rather than placed beside it.
@@ -480,7 +529,12 @@ const kit = ({ Box, Text, Code }: Ui, columns: number, frameSize: FrameWidth = '
     const natural = block.header.map((cell, column) =>
       Math.max(width(cell), ...block.rows.map(row => width(row[column] ?? ''))),
     )
-    const widths = fitColumns(natural, columns - 4 - (3 * count + 1))
+    const room = columns - 4 - (3 * count + 1)
+    const widths = fitColumns(natural, room)
+    // A table too wide for its columns at their narrowest is drawn a record at a time, not cut at the edge.
+    if (widths.reduce((sum, one) => sum + one, 0) > room) {
+      return stacked(block)
+    }
     const border = (left: string, middle: string, right: string) => (
       <Text color="inactive">{left + widths.map(one => '─'.repeat(one + 2)).join(middle) + right}</Text>
     )
@@ -536,8 +590,16 @@ const kit = ({ Box, Text, Code }: Ui, columns: number, frameSize: FrameWidth = '
 }
 
 /** What an opened tool row shows: the output a model read, framed and highlighted. */
-const detail = (ui: Ui, columns: number, tool: string, output: unknown, isErrored: boolean, frameSize: FrameWidth) => {
-  const { Box, Text, Markdown } = ui
+const detail = (
+  ui: Ui,
+  columns: number,
+  tool: string,
+  output: unknown,
+  isErrored: boolean,
+  frameSize: FrameWidth,
+  options: { showAll: boolean; toggle: () => void },
+) => {
+  const { Box, Text, Markdown, Button } = ui
   const { frame, code } = kit(ui, columns - 2, frameSize)
 
   if (typeof output === 'string') {
@@ -546,14 +608,49 @@ const detail = (ui: Ui, columns: number, tool: string, output: unknown, isErrore
     return frame(<Text color={isErrored ? 'error' : 'text'}>{shown.text}</Text>, isErrored ? 'error' : 'result', shown.note)
   }
   if (tool === 'Bash') {
-    const stdout = clip(text(field(output, 'stdout')))
-    const stderr = clip(withoutEngineNotes(text(field(output, 'stderr'))))
+    const limit = options.showAll ? MAX_LINES : DETAIL_LINES
+    const raw = field(output, 'stdout')
+    const stdout = clip(typeof raw === 'string' ? raw : '', limit, true)
+    const stderr = clip(withoutEngineNotes(text(field(output, 'stderr'))), limit)
 
     const files = editedFiles(output)
+    // The output as printed, its color codes drawn as colors; a blank line keeps its height.
+    const colored = (shown: string) => (
+      <Box flexDirection="column">
+        {shown.split('\n').map(line =>
+          line === '' ? (
+            <Text> </Text>
+          ) : (
+            <Text>
+              {colorRuns(line).map(run => (
+                <Text
+                  color={run.color}
+                  weight={run.bold ? 'bold' : undefined}
+                  dimColor={run.dim}
+                  italic={run.italic}
+                  underline={run.underline}
+                >
+                  {run.text}
+                </Text>
+              ))}
+            </Text>
+          ),
+        )}
+      </Box>
+    )
+    // Long output shows its first lines, and a control in the frame's border for the rest.
+    const more =
+      stdout.hidden > 0 || options.showAll ? (
+        <Button key="show-all" plain onPress={options.toggle}>
+          <Text color="suggestion">
+            {options.showAll ? `▴ first ${DETAIL_LINES} lines` : `▾ show all ${stdout.hidden + DETAIL_LINES} lines`}
+          </Text>
+        </Button>
+      ) : undefined
 
     return (
       <Box flexDirection="column">
-        {stdout.text !== '' && frame(code(stdout.text, {}), 'stdout', stdout.note)}
+        {stdout.text !== '' && frame(colored(stdout.text), 'stdout', stdout.note, more)}
         {stderr.text !== '' && frame(<Text color="error">{stderr.text}</Text>, 'stderr', stderr.note)}
         {files.map(file =>
           frame(code(file.diff, { language: 'diff', path: file.path }), basename(file.path), `+${file.added} −${file.removed}`),
@@ -613,19 +710,18 @@ const ROW_MARGIN = 4
 
 /** `text` cut to `room` columns with an ellipsis, at its end or, for a path, its middle. */
 const fit = (text: string, room: number, isPath: boolean) => {
-  const chars = [...text]
-  if (chars.length <= room) {
+  if (cellWidth(text) <= room) {
     return text
   }
   if (room <= 1) {
     return room === 1 ? '…' : ''
   }
   if (!isPath) {
-    return `${chars.slice(0, room - 1).join('')}…`
+    return `${takeCells(text, room - 1)[0]}…`
   }
   const head = Math.ceil((room - 1) / 2)
 
-  return `${chars.slice(0, head).join('')}…${chars.slice(chars.length - (room - 1 - head)).join('')}`
+  return `${takeCells(text, head)[0]}…${lastCells(text, room - 1 - head)}`
 }
 
 const taskTone = (status: string | undefined) => {
@@ -642,13 +738,56 @@ const taskTone = (status: string | undefined) => {
   }
 }
 
+/** A pane's arguments for `$.ui.open`. */
+type PaneArgs = Parameters<EngineInterface['ui']['open']>[0]
+
+/**
+ * Opens a pane, and says why the engine held it back: an open that nothing asked for draws only from 144
+ * columns, and the reason is the one word a person is given.
+ */
+const openPane = async ($: EngineInterface, args: PaneArgs) => {
+  const opened = await $.ui.open(args)
+  if (!opened.isPlaced) {
+    $.ui.toast(`${args.title} is not shown: ${opened.reason}`)
+  }
+
+  return opened
+}
+
+/** Opens the run dialog for a shell command: Run here runs it, Copy copies it. */
+const openRun = async ($: EngineInterface, command: string) => {
+  await update($, pending, () => ({ command, origin: null }))
+  await openPane($, { id: RUN_PANE, title: 'Run a command', focus: true, closeOnEscape: true })
+}
+
+/** Takes the run the dialog holds, once: a second press of a button finds nothing left to run. */
+const takePending = async ($: EngineInterface) => {
+  const taken: { run: { command: string; origin: string | null } | null } = { run: null }
+  await update($, pending, now => {
+    taken.run = now
+
+    return null
+  })
+
+  return taken.run
+}
+
+/** Registers a slash command. One the engine refuses must not stop the rest of the session's start. */
+const registerCommand = async ($: EngineInterface, command: Parameters<EngineInterface['command']['register']>[0]) => {
+  try {
+    await $.command.register(command)
+  } catch (error) {
+    $.ui.log(`nebula-ui: /${command.name} not registered: ${String(error)}`, { to: 'debug' })
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const saved = await $.store.get('disabled')
     if (Array.isArray(saved)) {
       await update($, disabled, () => saved.filter((one): one is string => typeof one === 'string'))
     }
-    await $.command.register({
+    await registerCommand($, {
       name: 'nebula',
       description: 'Open the Nebula UI panel to switch each restyled part on or off',
     })
@@ -660,7 +799,7 @@ export const register: Register = on => {
     if (isFrameWidth(savedWidth)) {
       await update($, frameWidth, () => savedWidth)
     }
-    await $.command.register({ name: 'procs', description: 'Show the commands started from replies, with their output and a stop button' })
+    await registerCommand($, { name: 'procs', description: 'Show the commands started from replies, with their output and a stop button' })
     void gather($)
     void adopt($)
     $.clock.every(15_000, () => {
@@ -684,7 +823,7 @@ export const register: Register = on => {
       await $.tool.register({
         name: 'process_control',
         description:
-          "Starts, stops or restarts a process in nebula-ui's process manager, where the user sees it in /procs and can stop it. start runs `command` with sh -c in the session's directory, in its own process group; stop ends the whole group; restart runs the same command again.",
+          "Starts, stops or restarts a process in nebula-ui's process manager, where the user sees it in /procs and can stop it. start runs `command` with sh -c in the session's directory, in its own process group; stop ends the whole group; restart runs the same command again. Each one needs the permission a Bash command needs: without it the call is refused.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -712,12 +851,25 @@ export const register: Register = on => {
     return done
   })
 
+  // The engine pushes the context, limits and cost as they move: the band reads them then, not on a timer alone.
+  // A burst of moves reads once, since each read also asks git for the branch.
+  let measuredAt = 0
+  on('session.measure', async ($, e, next) => {
+    const now = Date.now()
+    if (now - measuredAt >= 2000) {
+      measuredAt = now
+      void gather($)
+    }
+
+    return next(e)
+  })
+
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
     void gather($)
 
     return ran
-  })
+  }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     await themed($)
@@ -729,7 +881,7 @@ export const register: Register = on => {
     const { Button, Text } = $.ui.resolve(e)
     const chip =
       running === 0 ? undefined : (
-        <Button key="procs" plain onPress={() => void $.ui.open({ id: PROCS_PANE, title: 'Processes' })}>
+        <Button key="procs" plain onPress={() => void openPane($, { id: PROCS_PANE, title: 'Processes', closeOnEscape: true })}>
           <Text color="suggestion">⚙ {running} running</Text>
         </Button>
       )
@@ -748,9 +900,20 @@ export const register: Register = on => {
     const lines = typeof e.lines === 'number' ? Math.min(200, Math.max(1, Math.round(e.lines))) : 60
 
     return proc === undefined ? { deny: `No process ${id}; call processes without an id to list them.` } : { result: describeOutput(proc, now, lines) }
-  })
+  }).catch(() => ({ deny: 'nebula-ui could not read its process list.' }))
 
+  // A start, stop or restart is a shell command, so it runs only when the engine's own verdict allows it. An
+  // answer in place of core skips the permission dialog, so an ask here refuses instead of running unasked.
   on('tool.call', { tool: 'mcp__nebula-ui__process_control' }, async ($, e) => {
+    const verdict = await $.tool.check({
+      tool: 'mcp__nebula-ui__process_control',
+      input: { action: e.action, command: e.command, id: e.id },
+    })
+    if (verdict.decision !== 'allow') {
+      const ask = 'Starting, stopping or restarting a process needs your approval. Allow mcp__nebula-ui__process_control in your permissions, or run the command with Bash, which asks first.'
+
+      return { deny: verdict.decision === 'deny' ? (verdict.reason ?? 'Starting, stopping or restarting a process is not allowed here.') : ask }
+    }
     const list = await read($, procList)
     const id = typeof e.id === 'string' ? e.id : undefined
     const proc = list.find(one => one.id === id)
@@ -778,13 +941,16 @@ export const register: Register = on => {
           return { deny: `No process ${id ?? '(no id given)'}.` }
         }
         const restarted = await restartProc($, proc.id)
+        if (restarted === null) {
+          return { deny: `No process ${proc.id} to restart.` }
+        }
 
         return { result: `Restarted as ${restarted}: ${proc.command}.` }
       }
       default:
         return { deny: 'action is start, stop or restart.' }
     }
-  })
+  }).catch(() => ({ deny: 'Starting, stopping or restarting a process could not be checked, so it did not run.' }))
 
   on('session.end', async ($, e, next) => {
     // A process started from a reply ends with the session, its children too.
@@ -794,10 +960,10 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'procs' }, async $ => {
-    await $.ui.open({ id: PROCS_PANE, title: 'Processes' })
+    await openPane($, { id: PROCS_PANE, title: 'Processes', closeOnEscape: true })
 
     return { text: 'Processes pane opened.' }
-  })
+  }).catch(() => ({ text: 'nebula-ui could not open the Processes pane.' }))
 
   on('ui.render', { component: 'Pane', requestId: PROCS_PANE }, async ($, e) => {
     await themed($)
@@ -812,7 +978,7 @@ export const register: Register = on => {
     return drawProcs($.ui.resolve(e), list, now, e.props.bodyColumns, {
       stop: id => void stopProc($, id),
       restart: id => void restartProc($, id),
-      follow: proc => void $.ui.open({ id: `${FOLLOW_PANE}${proc.id}`, title: fit(proc.command, 32, false) }),
+      follow: proc => void openPane($, { id: `${FOLLOW_PANE}${proc.id}`, title: fit(proc.command, 32, false), closeOnEscape: true }),
       clear: id => void clearProc($, id),
       clearEnded: () => void update($, procList, all => all.filter(isRunning)),
     })
@@ -831,7 +997,7 @@ export const register: Register = on => {
       stop: () => void stopProc($, id),
       restart: () =>
         void restartProc($, id).then(fresh =>
-          fresh === null ? undefined : $.ui.open({ id: `${FOLLOW_PANE}${fresh}`, title: e.props.title }),
+          fresh === null ? undefined : openPane($, { id: `${FOLLOW_PANE}${fresh}`, title: e.props.title, closeOnEscape: true }),
         ),
     })
   })
@@ -865,11 +1031,11 @@ export const register: Register = on => {
             variant="primary"
             autoFocus
             onPress={async () => {
-              const chosen = await read($, pending)
+              const chosen = await takePending($)
               await close()
               if (chosen !== null) {
                 await startProc($, chosen.command, chosen.origin)
-                await $.ui.open({ id: PROCS_PANE, title: 'Processes' })
+                await openPane($, { id: PROCS_PANE, title: 'Processes', closeOnEscape: true })
               }
             }}
           />
@@ -878,7 +1044,7 @@ export const register: Register = on => {
             label="⧉ copy"
             hotkey="c"
             onPress={async () => {
-              const chosen = await read($, pending)
+              const chosen = await takePending($)
               await close()
               if (chosen !== null) {
                 const copied = await $.ui.copy({ text: chosen.command, surface: e.surface })
@@ -896,7 +1062,7 @@ export const register: Register = on => {
     await $.ui.open({ id: PANEL, title: 'Nebula UI', focus: true, closeOnEscape: true })
 
     return { text: 'Nebula UI panel opened.' }
-  })
+  }).catch(() => ({ text: 'nebula-ui could not open its panel.' }))
 
   on('ui.render', { component: 'Pane', requestId: PANEL }, async ($, e) => {
     await themed($)
@@ -951,7 +1117,7 @@ export const register: Register = on => {
       const { barred } = kit($.ui.resolve(e), e.viewport?.columns ?? 80)
       const room = (e.viewport?.columns ?? 80) - 3
       // The prompt as typed: no markdown read into it, a leading slash command marked out.
-      const rows = e.props.text.split('\n').flatMap((line, index) => {
+      const rows = printable(e.props.text).split('\n').flatMap((line, index) => {
         const command = index === 0 ? /^(\/\S+)(.*)$/.exec(line) : null
         const runs: Span[] =
           command === null
@@ -1009,8 +1175,7 @@ export const register: Register = on => {
         return
       }
       if (command.kind === 'shell') {
-        await update($, pending, () => ({ command: command.text, origin: null }))
-        await $.ui.open({ id: RUN_PANE, title: 'Run a command', focus: true, closeOnEscape: true })
+        await openRun($, command.text)
 
         return
       }
@@ -1077,16 +1242,35 @@ export const register: Register = on => {
       switch (block.kind) {
         case 'prose': {
           const { text, commands } = isClickable ? linkCommands(block.text) : { text: block.text, commands: new Map() }
+          const prose =
+            commands.size === 0 ? (
+              <Markdown text={block.text} />
+            ) : (
+              <Markdown
+                key={`commands-${index}`}
+                text={text}
+                pressableLinks={[...commands.keys()]}
+                onLinkPress={link => void use(commands.get(link.href))}
+              />
+            )
+          // A shell command in the prose also runs from a button. A press counts as asked, so the run dialog draws
+          // at any width, where a link press draws it only from 144 columns.
+          const shell = [...commands.values()].filter(command => command.kind === 'shell')
+          if (shell.length === 0) {
+            return prose
+          }
 
-          return commands.size === 0 ? (
-            <Markdown text={block.text} />
-          ) : (
-            <Markdown
-              key={`commands-${index}`}
-              text={text}
-              pressableLinks={[...commands.keys()]}
-              onLinkPress={link => void use(commands.get(link.href))}
-            />
+          return (
+            <Box flexDirection="column" rowGap={1}>
+              {prose}
+              <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+                {shell.map((command, at) => (
+                  <Button key={`run-${index}-${at}`} plain onPress={() => void openRun($, command.text)}>
+                    <Text color="success">▶ {fit(command.text, 48, false)}</Text>
+                  </Button>
+                ))}
+              </Box>
+            </Box>
           )
         }
         case 'code':
@@ -1168,6 +1352,8 @@ export const register: Register = on => {
     // A row the person never clicked follows the default: open for Bash while 'Open shell output' is on.
     const opensAlone = tool === 'Bash' && (await isOn($, 'ShellOpen'))
     const isOpen = isExpandable && ((await $.state.get({ ...expanded, id: tool_use_id })).value ?? opensAlone)
+    // A long output's "show all" control, kept by the row across redraws.
+    const showAll = (await $.state.get({ ...expanded, id: `all:${tool_use_id}` })).value === true
     // An opened row's frame names the length, so the row itself leaves it out.
     const brief = isErrored || isRunning || isOpen ? '' : summary(tool, output)
     const columns = e.viewport?.columns ?? 80
@@ -1191,7 +1377,10 @@ export const register: Register = on => {
         </Button>
         {isOpen && (
           <Box paddingLeft={2}>
-            {detail(ui, e.viewport?.columns ?? 80, tool, output, isErrored, await read($, frameWidth))}
+            {detail(ui, e.viewport?.columns ?? 80, tool, output, isErrored, await read($, frameWidth), {
+              showAll,
+              toggle: () => void update($, { ...expanded, id: `all:${tool_use_id}` }, value => value !== true),
+            })}
           </Box>
         )}
       </Box>
@@ -1237,7 +1426,8 @@ export const register: Register = on => {
     }
     const { Box, Text, Button } = $.ui.resolve(e)
     const { calls, isActive } = e.props
-    const failed = calls.filter(call => call.isErrored).length
+    const failed = calls.filter(call => call.isErrored && !call.isInterrupted).length
+    const interrupted = calls.filter(call => call.isInterrupted).length
     const last = calls[calls.length - 1]
     const lastTarget = last === undefined ? '' : describe(last.tool, last.input)
     const label = calls.every(call => call.tool === 'Bash') ? 'Shell' : 'Explore'
@@ -1248,19 +1438,28 @@ export const register: Register = on => {
     const pillText = ` ${isActive ? '' : `${isOpen ? '▾' : '▸'} `}${label} `
     const counts = ` ${tally(calls)}`
     const failedText = failed > 0 ? ` ${failed} failed` : ''
+    const interruptedText = interrupted > 0 ? ` ${interrupted} interrupted` : ''
     const room =
-      (e.viewport?.columns ?? 80) - ROW_MARGIN - 2 - [...pillText].length - [...counts].length - [...failedText].length - 1
+      (e.viewport?.columns ?? 80) -
+      ROW_MARGIN -
+      2 -
+      [...pillText].length -
+      [...counts].length -
+      [...failedText].length -
+      [...interruptedText].length -
+      1
     const shown = isActive ? fit(lastTarget, room, true) : ''
 
     const header = (
       <Box marginTop={1}>
         <Button key={group} plain onPress={() => update($, { ...expanded, id: group }, value => !(value ?? opensAlone))}>
-          <Text color={isActive ? 'suggestion' : 'success'}>{isActive ? '◌' : '✓'}</Text>{' '}
+          <Text color={isActive ? 'suggestion' : failed > 0 ? 'error' : 'success'}>{isActive ? '◌' : failed > 0 ? '✗' : '✓'}</Text>{' '}
           <Text inverse weight="bold" color="suggestion">
             {pillText}
           </Text>
           {counts}
           {failedText !== '' && <Text color="error">{failedText}</Text>}
+          {interruptedText !== '' && <Text color="warning">{interruptedText}</Text>}
           {shown !== '' && <Text dimColor> {shown}</Text>}
         </Button>
       </Box>
@@ -1293,7 +1492,7 @@ export const register: Register = on => {
 
     return (
       <Box marginLeft={2}>
-        {barred(wrapText(text.replace(/\n+$/, ''), room), isErrored ? 'error' : ACCENT, {
+        {barred(wrapText(printable(text).replace(/\n+$/, ''), room), isErrored ? 'error' : ACCENT, {
           glyph: '▎',
           ...(isErrored
             ? {
@@ -1315,9 +1514,9 @@ export const register: Register = on => {
       return next(e)
     }
     const { Box, Text } = $.ui.resolve(e)
-    const mode: { glyph: string; label: string; color: string } = (
-      SPINNER_MODES as Record<string, { glyph: string; label: string; color: string } | undefined>
-    )[e.props.mode] ?? { glyph: '◆', label: e.props.mode, color: ACCENT }
+    const mode: { glyph: string; label: string; color: string } = own(SPINNER_MODES, e.props.mode)
+      ? (SPINNER_MODES as Record<string, { glyph: string; label: string; color: string }>)[e.props.mode]!
+      : { glyph: '◆', label: e.props.mode, color: ACCENT }
     const shown = e.props.message ?? e.props.word
     const word = shown.endsWith('…') ? shown : `${shown}…`
     // The word moves into a pill of its own; the engine still draws its glyph, time and tokens. An empty word

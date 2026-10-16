@@ -69,7 +69,7 @@ test('a finished Bash row starts open on what it printed, and a click closes it'
   })
 
   expect(await row.find({ type: 'Text', text: /▾ Bash/ })).toBeDefined()
-  expect((await row.find({ type: 'Code' }))?.props).toMatchObject({ source: 'ok\nall good' })
+  expect(await row.find({ type: 'Text', text: 'all good' })).toBeDefined()
   expect((await row.find({ type: 'Button' }))?.text).not.toContain('2 lines')
 
   await row.press({ key: 'open-toolu_1' })
@@ -217,8 +217,9 @@ test('an opened Bash row shows each file it changed as a diff', async $ => {
   })
   const codes = await row.findAll({ type: 'Code' })
 
-  expect(codes.map(code => code.props.format)).toEqual(['source', 'diff'])
-  expect(codes[1]?.props.source).toBe('@@ -3,1 +3,2 @@\n-const a = 1\n+// why\n+const a = 2')
+  expect(await row.find({ type: 'Text', text: 'tsc=0' })).toBeDefined()
+  expect(codes.map(code => code.props.format)).toEqual(['diff'])
+  expect(codes[0]?.props.source).toBe('@@ -3,1 +3,2 @@\n-const a = 1\n+// why\n+const a = 2')
 })
 
 test('an opened Bash row leaves out the notes the engine adds to stderr', async $ => {
@@ -386,4 +387,16 @@ test('the accent preset recolors what nebula-ui draws, tables built at load incl
   })
   const titles = await callout.findAll({ type: 'Text', text: /◆ Important/ })
   expect(titles.some(one => one.props.color === '#b4befe')).toBe(true)
+})
+
+test("a command's colored output draws its text, not a refusal", async $ => {
+  const done = await $.ui.mount({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'CommandOutput',
+    props: { command: 'context', args: '', text: '\u001b[31mred\u001b[0m used', isErrored: false },
+  })
+
+  expect(await done.find({ type: 'Text', text: /red/ })).toBeDefined()
+  expect(await done.find({ type: 'Text', text: /refused/ })).toBeUndefined()
 })

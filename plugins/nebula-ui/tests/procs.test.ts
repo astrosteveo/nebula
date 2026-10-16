@@ -11,11 +11,20 @@ const pane = (bodyColumns = 100) => ({
   view: {},
 })
 
-const engine = (on: On, kills: string[][]) => {
+/** The pane ids the engine was asked to open, in order, since the last engine was set up. */
+let opened: string[] = []
+
+const engine = (on: On, kills: string[][], decision: 'allow' | 'ask' | 'deny' = 'allow') => {
   mock.store(on)
   const clock = mock.clock(on, { now: 1_000_000 })
+  opened = []
   on('session.cwd', () => ({ value: '/repo' }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('tool.check', () => ({ decision }))
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+
+    return { value: { isPlaced: true } }
+  })
   on('ui.close', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
@@ -139,4 +148,55 @@ test('a URL in process output is a link, a server bound to 0.0.0.0 opened as loc
   await reply.press({ key: 'run-0' })
 
   expect((await reply.find({ type: 'Link' }))?.props).toMatchObject({ href: 'http://localhost:8765/' })
+})
+
+test('a start the engine would ask about is refused, and nothing runs', async ($, on) => {
+  const kills: string[][] = []
+  engine(on, kills, 'ask')
+  let spawned = 0
+  on('process.spawn', async function* () {
+    spawned += 1
+    return { value: { code: 0, signal: null } }
+  })
+
+  const started = await $.tool.call({ tool: 'mcp__nebula-ui__process_control', action: 'start', command: 'rm -rf build' })
+
+  expect(started.deny).toContain('needs your approval')
+  expect(spawned).toBe(0)
+})
+
+test('the follow button opens its pane under an id the engine accepts', async ($, on) => {
+  const kills: string[][] = []
+  const clock = engine(on, kills)
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout' as const, text: 'tick\n' }
+
+    return { value: { code: 0, signal: null } }
+  })
+  const started = await $.tool.call({ tool: 'mcp__nebula-ui__process_control', action: 'start', command: 'sleep 1' })
+  const id = /Started (\w+)/.exec(String(started.result))?.[1] ?? ''
+  await clock.settle()
+
+  const procs = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'nebula-procs', props: pane() })
+  await procs.press({ key: `follow-${id}` })
+
+  expect(opened).toEqual([`nebula-proc-${id}`])
+})
+
+test("a process's color codes are stored as text, so the pane draws its output", async ($, on) => {
+  const kills: string[][] = []
+  const clock = engine(on, kills)
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout' as const, text: '\u001b[32mready\u001b[0m in 12ms\n' }
+
+    return { value: { code: 0, signal: null } }
+  })
+  await $.tool.call({ tool: 'mcp__nebula-ui__process_control', action: 'start', command: 'npm run dev' })
+  await clock.settle()
+
+  const procs = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'nebula-procs', props: pane() })
+  const text = (await procs.findAll({ type: 'Text' })).map(one => one.text).join('\n')
+
+  expect(text).toContain('ready in 12ms')
+  expect(text).not.toContain('\u001b')
 })

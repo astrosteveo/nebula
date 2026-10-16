@@ -1,6 +1,17 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { commandOf, fenceCommand, fitColumns, linkCommands, parse, width, wrapSpans, wrapText } from '../hooks/markdown'
+import {
+  cellWidth,
+  colorRuns,
+  commandOf,
+  fenceCommand,
+  fitColumns,
+  linkCommands,
+  parse,
+  width,
+  wrapSpans,
+  wrapText,
+} from '../hooks/markdown'
 
 const REPLY = [
   '# Plan',
@@ -215,9 +226,89 @@ test('the frame width setting fills, fits or holds code frames to a width', asyn
 
 test('a fence runs when it holds commands, as one script, and a lone slash command goes to the prompt', async () => {
   expect(fenceCommand('sh', 'python3 -m http.server 8765')).toEqual({ kind: 'shell', text: 'python3 -m http.server 8765' })
-  expect(fenceCommand('console', '$ npm install\n# then\n$ npm run dev')).toEqual({ kind: 'shell', text: 'npm install\nnpm run dev' })
+  expect(fenceCommand('console', '$ npm install\n# then\n$ npm run dev')).toEqual({ kind: 'shell', text: 'npm install\n# then\nnpm run dev' })
   expect(fenceCommand('', 'git fetch\ngit rebase origin/main')).toMatchObject({ kind: 'shell' })
   expect(fenceCommand('', '/plugin install nebula-ui@nebula')).toEqual({ kind: 'slash', text: '/plugin install nebula-ui@nebula' })
   expect(fenceCommand('ts', 'const a = 1')).toBeNull()
   expect(fenceCommand('', 'some plain notes')).toBeNull()
+})
+
+test('wide glyphs take two cells, so a table with them keeps its border', async $ => {
+  expect(cellWidth('日本語🚀✅')).toBe(10)
+  expect(cellWidth('👨‍👩‍👧')).toBe(2)
+  const reply = await $.ui.mount({
+    plugin: 'nebula-ui',
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    props: { text: '| Name | Note |\n|---|---|\n| 日本語 🚀 | ok |\n| plain | ✅ |', isFirstOfReply: false },
+    viewport: { columns: 60, rows: 40 },
+  })
+  const drawn = (await reply.findAll({ type: 'Text', text: /^[╭│├╰]/ })).filter(one => one.text.length > 1 && /[╮│┤╯]$/.test(one.text))
+  const widths = new Set(drawn.map(one => cellWidth(one.text)))
+
+  expect(drawn.length).toBeGreaterThan(3)
+  expect(widths.size).toBe(1)
+})
+
+test('a table too wide for its columns is drawn a record at a time, not cut at the edge', async $ => {
+  const wide = '| a | b | c | d | e | f | g | h |\n|---|---|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |'
+  const reply = await $.ui.mount({
+    plugin: 'nebula-ui',
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    props: { text: wide, isFirstOfReply: false },
+    viewport: { columns: 30, rows: 40 },
+  })
+
+  expect(await reply.find({ type: 'Text', text: /^╭/ })).toBeUndefined()
+  expect(await reply.find({ type: 'Text', text: /^a: 1$/ })).toBeDefined()
+})
+
+test('a fence closes on its own marker, a CRLF reply reads as an LF one, a lone backtick stays a character', async () => {
+  expect(parse('```md\n```python\nprint(1)\n```')).toEqual([{ kind: 'code', language: 'md', source: '```python\nprint(1)', isOpen: false }])
+  expect(parse('```sh\r\necho hi\r\n```')).toEqual([{ kind: 'code', language: 'sh', source: 'echo hi', isOpen: false }])
+  expect(parse('| a | b |\n|---|---|\n| don`t | yes |')).toEqual([
+    { kind: 'table', align: ['left', 'left'], header: ['a', 'b'], rows: [['don`t', 'yes']] },
+  ])
+})
+
+test('a shell fence runs as it is shown: comments and blank lines kept, prompts dropped', async () => {
+  expect(fenceCommand('sh', "cat > notes.md <<'EOF'\n# Notes\n\nhello\nEOF")).toEqual({
+    kind: 'shell',
+    text: "cat > notes.md <<'EOF'\n# Notes\n\nhello\nEOF",
+  })
+})
+
+test('a shell command with environment assignments reads as the command, a phrase in a sentence does not', async () => {
+  expect(commandOf('NODE_ENV=production npm run build')).toEqual({ kind: 'shell', text: 'NODE_ENV=production npm run build' })
+  expect(commandOf('find . -name "*.ts"')).toMatchObject({ kind: 'shell' })
+  expect(commandOf('export NODE_ENV=production')).toMatchObject({ kind: 'shell' })
+  expect(commandOf('find the bug')).toBeNull()
+  expect(commandOf('export const')).toBeNull()
+})
+
+test('a line of output reads its color codes as styles and drops the other escape codes', async () => {
+  expect(colorRuns('\u001b[31mred\u001b[0m plain')).toEqual([{ color: 'error', text: 'red' }, { text: ' plain' }])
+  expect(colorRuns('\u001b[1mbold\u001b[22m\u001b[2K gone')).toEqual([
+    { bold: true, text: 'bold' },
+    { bold: false, dim: false, text: ' gone' },
+  ])
+})
+
+test('a blank line of a code frame keeps its place, a shell command in prose also runs from a button', async $ => {
+  const code = await $.ui.mount({
+    plugin: 'nebula-ui',
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    props: { text: '```ts\na\n\nb\n```', isFirstOfReply: false },
+  })
+  expect((await code.find({ type: 'Code' }))?.props).toMatchObject({ source: 'a\n \nb' })
+
+  const prose = await $.ui.mount({
+    plugin: 'nebula-ui',
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    props: { text: 'Run `npm test` before you push.', isFirstOfReply: false },
+  })
+  expect(await prose.find({ type: 'Button', text: /▶ npm test/ })).toBeDefined()
 })

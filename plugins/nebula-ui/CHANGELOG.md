@@ -4,6 +4,32 @@ All notable changes to nebula-ui. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Changed
+
+- Starting, stopping or restarting a process from Claude needs the permission a Bash command needs. Allow `mcp__nebula-ui__process_control` in your permissions to let Claude use it; without that, the call is refused and the reason is in the tool row.
+
+### Fixed
+
+- `process_control` no longer starts a command without the engine's permission verdict. Before, it ran with no prompt while Bash asked.
+- Colored output from a process no longer makes the whole Processes pane refuse to draw; its stop and restart buttons stay on screen.
+- A stopped process no longer ends with a `TypeError` line, and a stop at the session's end kills what ignores SIGTERM after the grace period.
+- Python output from a process appears as it prints: the runtime is told not to hold its output back.
+- Output printed before a pause shows at once, not at the next line.
+- A running process stays in /procs however many processes start after it.
+- The Follow button opens its pane: its id is `nebula-proc-<id>`, which the engine accepts.
+- Table cells, prompt wrapping and word wrap count terminal cells, so CJK and emoji keep their borders; a table too wide for the reply is drawn a record at a time.
+- A table with a backtick that never closes keeps its cells.
+- Bash output keeps its colors, and a long output has a "show all" control for its lines.
+- A Shell group shows a failure mark when a call failed, and counts interrupted calls apart from failed ones.
+- `/context` and `/cost` output no longer draws a refusal notice.
+- Code frames keep their blank lines.
+- A shell fence runs as it is shown: its comments and blank lines are kept, and a transcript's `$ ` prompts are dropped.
+- A shell command in a reply's prose also runs from a button, which opens the run dialog at any width.
+- Run here and Copy act once per dialog, however often the button is pressed.
+- Escape closes the Processes pane and a follow pane.
+- The band reads a dated model id as its name, shows seconds under a minute, reads a cent-sized cost as under a cent, and reports figures it never measured as none.
+- Fences close only on their own marker line, a CRLF reply renders as an LF one, `NAME=value` prefixes and `export NAME=value` make a command, and a phrase such as `find the bug` does not.
+
 ## [0.1.9] - 2026-10-14
 
 ### Added

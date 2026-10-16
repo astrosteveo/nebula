@@ -6,6 +6,7 @@ test('model ids read as names', async () => {
   expect(modelName('claude-opus-5-5')).toBe('opus 5.5')
   expect(modelName('claude-sonnet-5-5[1m]')).toBe('sonnet 5.5 · 1m')
   expect(modelName('claude-fable-5-1')).toBe('fable 5.1')
+  expect(modelName('claude-haiku-4-5-20251001')).toBe('haiku 4.5')
 })
 
 test('the band draws the model, branch, context gauge, limits and cost', async ($, on) => {

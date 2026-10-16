@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 
 import type { Proc } from '../types'
+import { printable } from './markdown'
 import { ACCENT } from './theme'
 
 export const procs = atom({ plugin: 'nebula-ui', key: 'procs' } as const, [] as Proc[])
@@ -11,8 +12,12 @@ export const PROCS_PANE = 'nebula-procs'
 /** Lines kept of what a process printed. */
 const TAIL = 200
 
-/** Processes kept in the list, newest first. */
+/** Ended processes kept in the list, newest first. Running ones are always kept: a process is listed while it runs. */
 const KEPT = 30
+
+/** The longest line kept, and the longest one the model reads (a process can print a line without a newline). */
+const MAX_LINE = 1000
+const MODEL_LINE = 400
 
 /** The first thing the wrapper prints, on stderr: the process group to stop. */
 const GROUP_MARK = 'nebula-ui-pgid:'
@@ -52,6 +57,20 @@ async function signalGroup($: EngineInterface, pgid: number, signal: 'TERM' | 'K
   }
 }
 
+/** The list kept: every running process, and the newest `KEPT` of those that ended, newest first. */
+const keepRecent = (list: Proc[]) => {
+  let ended = 0
+
+  return list.filter(proc => {
+    if (isRunning(proc)) {
+      return true
+    }
+    ended += 1
+
+    return ended <= KEPT
+  })
+}
+
 /**
  * Runs `command` through `sh -c` in the session's directory, in a process group of its own (setsid), and
  * reads what it prints into the list until it ends.
@@ -61,11 +80,13 @@ export async function startProc($: EngineInterface, command: string, origin: str
   const cwd = await $.session.cwd()
   const startedAt = await $.clock.now()
   const proc: Proc = { id, command, cwd, startedAt, endedAt: null, status: 'running', code: null, pgid: null, tail: [], origin }
-  await update($, procs, list => [proc, ...list].slice(0, KEPT))
+  await update($, procs, list => keepRecent([proc, ...list]))
 
   const stream = $.process.spawn({
     argv: ['setsid', '-w', 'sh', '-c', `printf '${GROUP_MARK}%s\\n' "$$" >&2; ${command}`],
     cwd,
+    // A runtime that writes to a pipe holds its output back until it exits unless told not to.
+    env: { PYTHONUNBUFFERED: '1' },
   })
   const entry: Live = { stream, isStopping: false }
   live.set(id, entry)
@@ -74,15 +95,30 @@ export async function startProc($: EngineInterface, command: string, origin: str
     const lines: string[] = []
     let partial = ''
     let flushedAt = 0
+    let trailing = false
     const flush = async () => {
       flushedAt = Date.now()
       const tail = [...lines, ...(partial === '' ? [] : [partial])].slice(-TAIL)
       await patch($, id, one => ({ ...one, tail }))
     }
+    // Output that arrives inside the throttle window is written when the window ends, not at the next chunk.
+    const later = () => {
+      if (trailing) {
+        return
+      }
+      trailing = true
+      void (async () => {
+        await $.clock.sleep(Math.max(0, FLUSH_MS - (Date.now() - flushedAt)))
+        trailing = false
+        await flush()
+      })().catch(() => {
+        // The session ended first: the state is kept as the last flush left it.
+      })
+    }
 
     try {
       for await (const chunk of stream) {
-        let text = chunk.text
+        let text = printable(chunk.text)
         if (chunk.stream === 'stderr' && text.includes(GROUP_MARK)) {
           const found = new RegExp(`${GROUP_MARK}(\\d+)\\n?`).exec(text)
           if (found !== null) {
@@ -92,16 +128,21 @@ export async function startProc($: EngineInterface, command: string, origin: str
           }
         }
         const pieces = (partial + text).split('\n')
-        partial = pieces.pop() ?? ''
-        lines.push(...pieces)
+        partial = (pieces.pop() ?? '').slice(0, MAX_LINE)
+        lines.push(...pieces.map(piece => piece.slice(0, MAX_LINE)))
         lines.splice(0, Math.max(0, lines.length - TAIL))
         if (Date.now() - flushedAt >= FLUSH_MS) {
           await flush()
+        } else {
+          later()
         }
       }
-      const { code, signal } = await stream.result
+      // A stop ends the stream on purpose, and its result is then nothing: the process ended by the stop.
+      const result = (await stream.result) as ProcessSpawnResult | undefined
       await flush()
       const endedAt = await $.clock.now()
+      const code = result?.code ?? null
+      const signal = result?.signal ?? null
       await patch($, id, one => ({
         ...one,
         endedAt,
@@ -109,18 +150,21 @@ export async function startProc($: EngineInterface, command: string, origin: str
         status: entry.isStopping || signal !== null ? 'stopped' : code === 0 ? 'exited' : 'failed',
       }))
     } catch (error) {
-      await flush()
+      await flush().catch(() => undefined)
       const endedAt = await $.clock.now()
       await patch($, id, one => ({
         ...one,
         endedAt,
         status: entry.isStopping ? 'stopped' : 'failed',
-        tail: [...one.tail, String(error)].slice(-TAIL),
+        // A stop ends the stream on purpose, which is not an error of the process.
+        tail: entry.isStopping ? one.tail : [...one.tail, String(error)].slice(-TAIL),
       }))
     } finally {
       live.delete(id)
     }
-  })()
+  })().catch(() => {
+    // Nothing reads an error from here: the process's state records how it ended.
+  })
 
   return id
 }
@@ -143,7 +187,7 @@ export async function stopProc($: EngineInterface, id: string) {
       if (await isGroupAlive($, pgid)) {
         await signalGroup($, pgid, 'KILL')
       }
-    })()
+    })().catch(() => undefined)
   }
   if (entry !== undefined) {
     await entry.stream.return(undefined as never).catch(() => undefined)
@@ -153,10 +197,33 @@ export async function stopProc($: EngineInterface, id: string) {
   }
 }
 
-/** Stops every process still running: at the session's end, so nothing is left behind untracked. */
+/**
+ * Stops every process still running, at the session's end, so nothing is left behind untracked. A stop's
+ * kill timer would die with the session, so this waits out the grace period and kills what still lives.
+ */
 export async function stopAll($: EngineInterface) {
-  const running = (await read($, procs)).filter(proc => proc.status === 'running' || proc.status === 'detached')
+  const running = (await read($, procs)).filter(isRunning)
+  const groups = running.flatMap(proc => (proc.pgid === null ? [] : [proc.pgid]))
   await Promise.all(running.map(proc => stopProc($, proc.id)))
+  const survivors = async () => {
+    const alive: number[] = []
+    for (const pgid of groups) {
+      if (await isGroupAlive($, pgid)) {
+        alive.push(pgid)
+      }
+    }
+
+    return alive
+  }
+  for (let waited = 0; waited < GRACE_MS; waited += 100) {
+    if ((await survivors()).length === 0) {
+      return
+    }
+    await $.clock.sleep(100)
+  }
+  for (const pgid of await survivors()) {
+    await signalGroup($, pgid, 'KILL')
+  }
 }
 
 /**
@@ -171,9 +238,14 @@ export async function adopt($: EngineInterface) {
     const isAlive = proc.pgid !== null && (await isGroupAlive($, proc.pgid))
     if (proc.status === 'running' || !isAlive) {
       const now = await $.clock.now()
-      await patch($, proc.id, one =>
-        isAlive ? { ...one, status: 'detached' } : { ...one, status: 'exited', endedAt: one.endedAt ?? now },
-      )
+      await patch($, proc.id, one => {
+        // Judged on the state as it stands now: a process that ended during the check keeps its end.
+        if (one.status !== 'running' && one.status !== 'detached') {
+          return one
+        }
+
+        return isAlive ? { ...one, status: 'detached' } : { ...one, status: 'exited', endedAt: one.endedAt ?? now }
+      })
     }
   }
 }
@@ -297,7 +369,7 @@ export const drawProcs = (
   )
 }
 
-/** Starts a process again with the command and frame it ran from, stopping it first if it still runs. */
+/** Starts a process again with the command and frame it ran from, stopping it first if it still runs. Null when it is not listed. */
 export async function restartProc($: EngineInterface, id: string) {
   const proc = (await read($, procs)).find(one => one.id === id)
   if (proc === undefined) {
@@ -322,7 +394,10 @@ export const describeProcs = (list: Proc[], now: number) =>
           [
             `${proc.id}  ${proc.status}  ${statusWord(proc, now)}  in ${proc.cwd}`,
             `  $ ${proc.command}`,
-            ...proc.tail.filter(line => line.trim() !== '').slice(-3).map(line => `  | ${line}`),
+            ...proc.tail
+              .filter(line => line.trim() !== '')
+              .slice(-3)
+              .map(line => `  | ${line.slice(0, MODEL_LINE)}`),
           ].join('\n'),
         )
         .join('\n\n')
@@ -333,20 +408,25 @@ export const describeOutput = (proc: Proc, now: number, lines: number) =>
     `${proc.id}  ${proc.status}  ${statusWord(proc, now)}  in ${proc.cwd}`,
     `$ ${proc.command}`,
     '',
-    ...(proc.tail.length === 0 ? ['(no output yet)'] : proc.tail.slice(-lines)),
+    ...(proc.tail.length === 0
+      ? ['(no output yet)']
+      : lines > 0
+        ? proc.tail.slice(-lines).map(line => line.slice(0, MODEL_LINE))
+        : []),
   ].join('\n')
 
 const URL = /https?:\/\/[^\s)\]'"<>`]+/g
 
-/** A line of output with each URL a link (a server's 0.0.0.0 opened as localhost). */
+/** A line of output with each URL a link (a server's 0.0.0.0 opened as localhost). Escape codes are not drawn. */
 export const outputLine = ({ Text, Link }: Elements['terminal'], line: string) => {
   const parts: Array<string | { url: string }> = []
   let at = 0
-  for (const found of line.matchAll(URL)) {
-    parts.push(line.slice(at, found.index), { url: found[0] })
+  const plain = printable(line)
+  for (const found of plain.matchAll(URL)) {
+    parts.push(plain.slice(at, found.index), { url: found[0] })
     at = found.index + found[0].length
   }
-  parts.push(line.slice(at))
+  parts.push(plain.slice(at))
 
   return (
     <Text wrap="truncate-end">
@@ -357,7 +437,8 @@ export const outputLine = ({ Text, Link }: Elements['terminal'], line: string) =
   )
 }
 
-export const FOLLOW_PANE = 'nebula-proc:'
+/** The pane id prefix of a process's own pane. A colon is outside the engine's id rule, so it is a hyphen. */
+export const FOLLOW_PANE = 'nebula-proc-'
 
 /** A pane following one process: its status and controls, then as many of its last lines as fit. */
 export const drawFollow = (
@@ -390,6 +471,7 @@ export const drawFollow = (
       </Box>
       <Text dimColor wrap="truncate-end">
         $ {proc.command} · {proc.cwd}
+        {proc.pgid === null ? '' : ` · group ${proc.pgid}`}
       </Text>
       {proc.tail.slice(-Math.max(1, rows - 2)).map(line => outputLine(ui, line))}
     </Box>

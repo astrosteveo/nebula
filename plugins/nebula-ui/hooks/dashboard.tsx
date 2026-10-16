@@ -60,12 +60,13 @@ export async function gather($: EngineInterface) {
   }
 }
 
-/** `claude-opus-5-5[1m]` as `opus 5.5 · 1m`. */
+/** `claude-opus-5-5[1m]` as `opus 5.5 · 1m`; a dated id (`claude-haiku-4-5-20251001`) as `haiku 4.5`. */
 export const modelName = (id: string) => {
   const suffix = /\[(.*)\]$/.exec(id)?.[1]
   const short = id
     .replace(/\[.*\]$/, '')
     .replace(/^claude-/, '')
+    .replace(/-\d{8}$/, '')
     .replace(/-(\d+)-(\d+)$/, ' $1.$2')
     .replace(/-(\d+)$/, ' $1')
 
@@ -76,8 +77,15 @@ const LIMITS: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend
 
 const limitName = (kind: string) => LIMITS[kind] ?? kind.replace(/^seven_day_/, '7d ').replace(/_/g, ' ')
 
+/** A span of time as the band shows it: seconds under a minute, then minutes, hours and days. */
 const span = (ms: number) => {
-  const minutes = Math.max(0, Math.round(ms / 60_000))
+  if (!Number.isFinite(ms) || ms < 0) {
+    return '0s'
+  }
+  if (ms < 60_000) {
+    return `${Math.floor(ms / 1000)}s`
+  }
+  const minutes = Math.round(ms / 60_000)
   const hours = Math.floor(minutes / 60)
   const days = Math.floor(hours / 24)
 
@@ -90,9 +98,15 @@ const gauge = (percent: number, cells: number) => {
   return '▰'.repeat(filled) + '▱'.repeat(cells - filled)
 }
 
-/** One row of figures, separated by dim bars; wraps to a second row where the band is narrow. */
+/** Dollars as the band shows them: two places, and `<$0.01` for a turn cheaper than a cent. */
+const money = (usd: number) => (usd > 0 && usd < 0.01 ? '<0.01' : usd.toFixed(2))
+
+/**
+ * One row of figures, each behind a dim bar; the row wraps where the band is narrow, and a figure that
+ * starts a wrapped row carries its bar with it, so no bar is left at the end of one.
+ */
 export const drawBand = ({ Box, Text }: Elements['terminal'], d: Dash, extra?: RenderElement) => {
-  const items = [
+  const items: RenderElement[] = [
     <Text>
       <Text color={ACCENT}>✦ </Text>
       <Text weight="bold">{modelName(d.model)}</Text>
@@ -111,8 +125,8 @@ export const drawBand = ({ Box, Text }: Elements['terminal'], d: Dash, extra?: R
     )
   }
 
-  if (d.context.percent !== null) {
-    const percent = d.context.percent
+  const percent = d.context?.percent
+  if (percent !== null && percent !== undefined && Number.isFinite(percent)) {
     items.push(
       <Text>
         <Text dimColor>ctx </Text>
@@ -121,7 +135,10 @@ export const drawBand = ({ Box, Text }: Elements['terminal'], d: Dash, extra?: R
     )
   }
 
-  for (const limit of d.limits) {
+  for (const limit of d.limits ?? []) {
+    if (!Number.isFinite(limit.percent)) {
+      continue
+    }
     const resets = limit.resetsAt === null ? NaN : Date.parse(limit.resetsAt) - d.now
     items.push(
       <Text>
@@ -132,11 +149,11 @@ export const drawBand = ({ Box, Text }: Elements['terminal'], d: Dash, extra?: R
     )
   }
 
-  if (d.cost !== null) {
+  if (d.cost !== null && Number.isFinite(d.cost) && d.cost >= 0) {
     items.push(
       <Text>
         <Text color="success">$</Text>
-        {d.cost.toFixed(2)}
+        {money(d.cost)}
       </Text>,
     )
   }
@@ -149,7 +166,17 @@ export const drawBand = ({ Box, Text }: Elements['terminal'], d: Dash, extra?: R
 
   return (
     <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-      {items.flatMap((item, index) => (index === 0 ? [item] : [<Text color="inactive">│</Text>, item]))}
+      {items.map((item, index) =>
+        index === 0 ? (
+          item
+        ) : (
+          // A row, not a text: the chip is a button, which the engine refuses inside a text.
+          <Box flexDirection="row">
+            <Text color="inactive">│ </Text>
+            {item}
+          </Box>
+        ),
+      )}
     </Box>
   )
 }

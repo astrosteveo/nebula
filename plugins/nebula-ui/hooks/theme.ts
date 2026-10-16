@@ -14,7 +14,8 @@ export type ThemeName = keyof typeof THEMES
 
 export const THEME_NAMES = Object.keys(THEMES) as ThemeName[]
 
-export const isThemeName = (value: unknown): value is ThemeName => typeof value === 'string' && value in THEMES
+export const isThemeName = (value: unknown): value is ThemeName =>
+  typeof value === 'string' && Object.prototype.hasOwnProperty.call(THEMES, value)
 
 /**
  * The color nebula-ui accents with. A live binding: every module that imports it reads the value the
