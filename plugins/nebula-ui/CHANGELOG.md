@@ -4,6 +4,8 @@ All notable changes to nebula-ui. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-15
+
 ### Changed
 
 - Starting, stopping or restarting a process from Claude needs the permission a Bash command needs. Allow `mcp__nebula-ui__process_control` in your permissions to let Claude use it; without that, the call is refused and the reason is in the tool row.
@@ -133,7 +135,8 @@ The first tagged [release](https://github.com/astrosteveo/nebula/releases/tag/ne
 
 - The first version: prompt bars, rich markdown with framed code and redrawn tables, tool rows that open on a click to their output, a dashboard band above the prompt, and touches to the spinner, footer and turn divider. Each part switches on or off from `/nebula`.
 
-[Unreleased]: https://github.com/astrosteveo/nebula/compare/nebula-ui-v0.1.9...HEAD
+[Unreleased]: https://github.com/astrosteveo/nebula/compare/nebula-ui-v0.2.0...HEAD
+[0.2.0]: https://github.com/astrosteveo/nebula/releases/tag/nebula-ui-v0.2.0
 [0.1.9]: https://github.com/astrosteveo/nebula/releases/tag/nebula-ui-v0.1.9
 [0.1.8]: https://github.com/astrosteveo/nebula/releases/tag/nebula-ui-v0.1.8
 [0.1.7]: https://github.com/astrosteveo/nebula/commit/cb80b96
