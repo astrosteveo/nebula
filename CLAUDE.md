@@ -1,6 +1,6 @@
 # nebula
 
-A Claude Code plugin marketplace (`.claude-plugin/marketplace.json`). Its main plugin is **nebula-ui** (`plugins/nebula-ui/`), a mod built on the Claude Code mods API (`hooks/hooks.json` → `hooks/register.tsx`). Other plugins are listed by GitHub source (`gdh`).
+A Claude Code plugin marketplace (`.claude-plugin/marketplace.json`). Its main plugin is **nebula-ui** (`plugins/nebula-ui/`), a mod built on the Claude Code mods API (`hooks/hooks.json` → `hooks/register.tsx`). Plugins that aren't mods, such as gdh, are in the astrocode marketplace (astrosteveo/astrocode).
 
 ## nebula-ui layout
 

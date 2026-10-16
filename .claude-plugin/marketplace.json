@@ -9,14 +9,6 @@
       "name": "nebula-ui",
       "source": "./plugins/nebula-ui",
       "description": "A modern restyle of Claude Code: prompt bars, rich markdown with framed code and tables, clickable tool rows, a live dashboard band, each part switchable from /nebula."
-    },
-    {
-      "name": "gdh",
-      "source": {
-        "source": "github",
-        "repo": "astrosteveo/gdh"
-      },
-      "description": "Lets Claude make Godot 4 games: see and drive them off-screen on the GPU, work through the open editor with real UIDs, check scripts and the API, run tests and export builds."
     }
   ]
 }
